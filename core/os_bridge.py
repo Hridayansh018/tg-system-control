@@ -249,6 +249,35 @@ def list_top_processes(limit: int = 10) -> str:
 # GUI AUTOMATION: Direct Native OS Mouse & Hardware Keyboard Keystrokes
 # ----------------------------------------------------------------------
 
+def set_user_input_blocked(blocked: bool) -> bool:
+    """Blocks or unblocks physical user mouse and keyboard input on Windows.
+    Used during precise interactive GUI automation sequences.
+    """
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            res = ctypes.windll.user32.BlockInput(bool(blocked))
+            return bool(res)
+        except Exception as e:
+            print(f"[GUI] BlockInput error: {e}")
+    return False
+
+
+class UserInputLock:
+    """Context manager to safely lock physical user input during GUI operations
+    and guarantee restoration even if an error occurs.
+    """
+    def __init__(self, action_name="GUI Action"):
+        self.action_name = action_name
+
+    def __enter__(self):
+        set_user_input_blocked(True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        set_user_input_blocked(False)
+
+
 def mouse_move(x: int, y: int) -> bool:
     """Moves the mouse cursor directly on the physical display."""
     if IS_WINDOWS:

@@ -151,28 +151,32 @@ class HermesAgent:
             m = re.findall(r"\d+", user_text)
             if len(m) >= 2:
                 x, y = int(m[0]), int(m[1])
-                ok = os_bridge.mouse_click(x, y)
+                with os_bridge.UserInputLock("Mouse Click"):
+                    ok = os_bridge.mouse_click(x, y)
                 memory_logger.log_entry("GUI_MOUSE_CLICK", f"Clicked at ({x}, {y})", details={"x": x, "y": y, "success": ok})
-                return {"text": f"🖱️ Clicked at *({x}, {y})*", "photo": None}
+                return {"text": f"🖱️ Clicked at *({x}, {y})* (User input safely locked & restored)", "photo": None}
 
         # 8. GUI: Type Text (/type text or type: text)
         if user_text.startswith(("/type ", "type: ", "write: ")):
             txt = re.sub(r"^(/type |type: |write: )", "", user_text)
-            ok = os_bridge.type_text(txt)
+            with os_bridge.UserInputLock("Keyboard Type"):
+                ok = os_bridge.type_text(txt)
             memory_logger.log_entry("GUI_KEYBOARD_TYPE", f"Typed text ({len(txt)} chars)", details={"preview": txt[:100], "success": ok})
-            return {"text": f"⌨️ Typed: `{txt[:100]}`", "photo": None}
+            return {"text": f"⌨️ Typed: `{txt[:100]}` (User input safely locked & restored)", "photo": None}
 
         # 9. GUI: Press Key (/key enter or key: esc)
         if user_text.startswith(("/key ", "key: ")):
             k = re.sub(r"^(/key |key: )", "", user_text).strip()
-            ok = os_bridge.press_key(k)
+            with os_bridge.UserInputLock(f"Key Press {k}"):
+                ok = os_bridge.press_key(k)
             memory_logger.log_entry("GUI_KEY_PRESS", f"Pressed key: {k}", details={"key": k, "success": ok})
             return {"text": f"🔘 Pressed key *{k.upper()}*", "photo": None}
 
         # 10. GUI: Hotkey (/hotkey ctrl+v or hotkey: alt+tab)
         if user_text.startswith(("/hotkey ", "hotkey: ")):
             hk = re.sub(r"^(/hotkey |hotkey: )", "", user_text).strip()
-            ok = os_bridge.press_hotkey(hk)
+            with os_bridge.UserInputLock(f"Hotkey {hk}"):
+                ok = os_bridge.press_hotkey(hk)
             memory_logger.log_entry("GUI_HOTKEY", f"Pressed hotkey: {hk}", details={"hotkey": hk, "success": ok})
             return {"text": f"⚡ Pressed hotkey *{hk.upper()}*", "photo": None}
 
@@ -243,22 +247,26 @@ class HermesAgent:
                     y = params.get("y")
                     btn = params.get("button", "left")
                     dbl = params.get("double", False)
-                    os_bridge.mouse_click(x, y, btn, dbl)
+                    with os_bridge.UserInputLock("LLM Mouse Click"):
+                        os_bridge.mouse_click(x, y, btn, dbl)
                     return {"text": f"🖱️ Clicked at ({x}, {y})", "photo": None}
 
                 elif act == "type_text":
                     txt = params.get("text", "")
-                    os_bridge.type_text(txt)
+                    with os_bridge.UserInputLock("LLM Keyboard Type"):
+                        os_bridge.type_text(txt)
                     return {"text": f"⌨️ Typed: `{txt}`", "photo": None}
 
                 elif act == "press_key":
                     k = params.get("key", "enter")
-                    os_bridge.press_key(k)
+                    with os_bridge.UserInputLock(f"LLM Key Press {k}"):
+                        os_bridge.press_key(k)
                     return {"text": f"🔘 Pressed key *{k.upper()}*", "photo": None}
 
                 elif act == "press_hotkey":
                     hk = params.get("hotkey", "")
-                    os_bridge.press_hotkey(hk)
+                    with os_bridge.UserInputLock(f"LLM Hotkey {hk}"):
+                        os_bridge.press_hotkey(hk)
                     return {"text": f"⚡ Pressed hotkey *{hk.upper()}*", "photo": None}
 
             except Exception:
