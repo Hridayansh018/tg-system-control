@@ -101,8 +101,16 @@ cp .env.example .env      # Windows: copy .env.example .env
 | `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` | for openrouter | — / `nousresearch/hermes-3-llama-3.1-70b` | Any OpenRouter model (Hermes, Claude, …) |
 | `GROQ_API_KEY` | for groq | — | Uses `llama-3.3-70b-versatile` |
 | `HERMES_APP_PATH` | | `D:\git-data\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe` | Used by `open hermes` |
+| `AGENT_ENABLED` | | `true` | Agent mode (`/agent`, `/do`); needs `GEMINI_API_KEY` |
+| `AGENT_MODEL` | | `gemini-flash-latest` + fallbacks | Comma-separated Gemini vision models to try first |
+| `AGENT_MAX_STEPS` | | `30` | Max actions per agent task |
+| `AGENT_REQUIRE_APPROVAL` | | `true` | ✅/❌ approval before risky agent steps (keep on) |
+| `APPROVAL_TIMEOUT_SEC` | | `300` | Unanswered approvals / agent questions are cancelled after this |
+| `INBOX_DIR` | | `~/Downloads/TelegramInbox` | Where files you send to the bot are saved |
 
 **How the AI is used:** exact commands (`open edge`, `screenshot`, `/exec …`) never touch the AI. Other messages are sent to the provider, which may only translate them into commands from a fixed menu. If the provider's key is empty, the bot runs in offline mode.
+
+**Agent mode** (`/agent <task>`) sends a screenshot of the whole screen to Gemini at every step and executes one validated action at a time; risky steps wait for your ✅ in Telegram, and `/stop` cancels. It always uses Gemini, so set `GEMINI_API_KEY` even if `LLM_PROVIDER` is different. Details and safety rules: README → *Automate anything*.
 
 Example (Gemini):
 ```env
@@ -129,14 +137,14 @@ If you install it somewhere else, set `HERMES_APP_PATH` in `.env` so `open herme
 ```bash
 python setup_check.py
 ```
-It checks: OS, Python version, `requests`/`Pillow` (+ optional `psutil`), `.env` token and chat ID (**placeholders fail**), AI translator status, `memory.md` is git-ignored, metrics, shell, screenshot, and that the token works (`getMe`, no message is sent). Exit code is non-zero if anything required fails.
+It checks: OS, Python version, `requests`/`Pillow` (+ optional `psutil`), `.env` token and chat ID (**placeholders fail**), AI translator and agent-mode status, `memory.md` is git-ignored, metrics, shell, screenshot, and that the token works (`getMe`, no message is sent). Exit code is non-zero if anything required fails.
 
 ---
 
 ## 🧠 6. Activity log (`memory.md`)
 
 Created automatically in the project folder:
-1. **Append-only** — every command, translator result, lifecycle event (online, offline, warm-up), network drop/restore and rejected access attempt is appended with a timestamp.
+1. **Append-only** — every command, translator result, agent task and step (with the model's reasoning), approval decision, upload, lifecycle event (online, offline, warm-up), network drop/restore and rejected access attempt is appended with a timestamp.
 2. **Never truncated** by the bot.
 3. **Git-ignored** — it stays on your PC.
 
@@ -155,6 +163,8 @@ Python used by the Windows launchers: project `.venv` → `python` on PATH (if i
 `stop_agent.bat` asks the bot to stop itself (it sends 🔴 OFFLINE), waits up to 10 seconds, then force-stops anything still running from this folder (including bots started by v1 launchers).
 
 **After changing code or `.env`, restart the bot** — changes are not picked up while it runs.
+
+**First agent test:** after the bot says 🟢 ONLINE, send `/agent open notepad and type hello`. You should see a progress message, then a screenshot with the result. Send `/stop` at any time to cancel.
 
 ---
 

@@ -114,6 +114,12 @@ def main():
     else:
         check_step("AI Translator", True, "Offline mode (exact commands only)")
 
+    agent_on = env_data.get("AGENT_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+    if agent_on and env_data.get("GEMINI_API_KEY"):
+        check_step("Agent mode (/agent)", True, "ON (Gemini vision)")
+    else:
+        check_step("Agent mode (/agent)", True, "OFF (needs GEMINI_API_KEY and AGENT_ENABLED=true)")
+
     # Constructive Memory Initialization
     try:
         from core import memory_logger

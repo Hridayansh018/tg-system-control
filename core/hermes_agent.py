@@ -46,6 +46,17 @@ HELP_TEXT = (
     "e.g. _\"spotify kholo aur edge band karo\"_."
 )
 
+AGENT_HELP = (
+    "\n\n🧠 *Automate anything (agent mode):*\n"
+    "• `/agent <task>` or `/do <task>` — the AI looks at the screen and clicks/types step by step\n"
+    "  e.g. `/agent chatgpt me luffy ke 3 thumbnail banao aur download karke bhejo`\n"
+    "• `/task` — progress · `/stop` — cancel immediately\n"
+    "• Risky steps (sending, buying, deleting, installing, shell changes) ask for ✅/❌ first\n\n"
+    "🧰 *More:* send a photo/file → saved to the PC inbox · `/get <path>` · `/clip` · `/clip <text>` · "
+    "`/volume up|down|mute` · `/media play|next|prev` · `/scroll up|down` · `/windows` · "
+    "`/sleep` · `/restart` · `/shutdown` (with approval)"
+)
+
 _END_PUNCT = re.compile(r"[\s.!?]+$")
 
 
@@ -70,11 +81,22 @@ RAW_PREFIX_RULES = [
     (r"^/focus\s+(.+)$", "focus"),
     (r"^/chatgpt\s+(.+)$", "chatgpt"),
     (r"^(?:/sendfile|/file|send file:?)\s+(.+)$", "send_file"),
+    (r"^(?:/agent|/do)\s+(.+)$", "agent"),
+    (r"^/get\s+(.+)$", "get_file"),
+    (r"^/clip\s+(.+)$", "clipboard_set"),
+    (r"^/volume\s+(up|down|mute)$", "volume"),
+    (r"^/media\s+(play|pause|next|prev|previous|stop)$", "media"),
+    (r"^/scroll\s+(up|down)$", "scroll"),
 ]
 
 # (fullmatch regex on the normalised text, command, arg-or-None-for-group-1)
 PHRASE_RULES = [
     (r"/help|/start|help|commands|menu", "help", ""),
+    (r"/clip|clipboard( bhejo| dikhao)?", "clipboard_get", ""),
+    (r"/windows|windows list|open windows", "windows", ""),
+    (r"/sleep", "power", "sleep"),
+    (r"/restart|/reboot", "power", "restart"),
+    (r"/shutdown", "power", "shutdown"),
     (r"/latest|send latest download|latest download( bhejo)?|last download bhejo", "send_latest_download", ""),
     (r"/shot|/screenshot|(?:(?:take|send|le|lo) )?(?:a )?(?:screenshot|screen shot|ss|screen capture)"
      r"(?: (?:bhejo|bhej do|lo|le lo|do|dikhao|please|pls|now))*|desktop dikhao|screen dikhao", "screenshot", ""),
@@ -131,9 +153,12 @@ def _result(text: str = "", files: list = None) -> dict:
 
 
 class HermesAgent:
-    def __init__(self, agent_hook: Optional[Callable[[str], dict]] = None):
+    def __init__(self, agent_hook: Optional[Callable[[str], dict]] = None,
+                 approver: Optional[Callable[[str, str], bool]] = None):
         # agent_hook(task) -> result dict; set by the listener when agent mode is available.
         self.agent_hook = agent_hook
+        # approver(title, details) -> bool; shows Approve/Cancel buttons and waits for the user.
+        self.approver = approver
 
     # ------------------------------------------------------------------
     def process_message(self, user_text: str) -> dict:
@@ -201,7 +226,60 @@ class HermesAgent:
         return handler(arg)
 
     def cmd_help(self, arg):
-        return _result(HELP_TEXT)
+        return _result(HELP_TEXT + (AGENT_HELP if self.agent_hook else ""))
+
+    def _approve(self, title: str, details: str) -> bool:
+        return bool(self.approver and self.approver(title, details))
+
+    def cmd_agent(self, arg):
+        if self.agent_hook is None:
+            return _result("⚠️ Agent mode is off. Set `GEMINI_API_KEY` (and `AGENT_ENABLED=true`) in `.env`, then restart the bot.")
+        return self.agent_hook(arg)
+
+    def cmd_get_file(self, arg):
+        from . import agent_safety
+        f = os_bridge.find_file(arg)
+        if not f:
+            return _result(f"⚠️ File `{arg}` not found.")
+        reason = agent_safety.path_needs_approval(str(f))
+        if reason and not self._approve(f"Send file {f.name} to your phone", reason):
+            return _result(f"❌ Not sent: {reason}.")
+        return self.cmd_send_file(str(f))
+
+    def cmd_clipboard_get(self, arg):
+        text = os_bridge.get_clipboard()
+        if text is None:
+            return _result("⚠️ Could not read the clipboard.")
+        body = text[:3500] or "(empty)"
+        return _result(f"📋 *Clipboard:*\n```\n{body}\n```")
+
+    def cmd_clipboard_set(self, arg):
+        return _result("📋 Copied to the PC clipboard." if os_bridge.set_clipboard(arg) else "⚠️ Clipboard write failed.")
+
+    def cmd_volume(self, arg):
+        return _result(f"🔊 Volume {arg}" if os_bridge.media_key(arg) else f"⚠️ Volume `{arg}` not supported here.")
+
+    def cmd_media(self, arg):
+        return _result(f"⏯️ Media {arg}" if os_bridge.media_key(arg) else f"⚠️ Media `{arg}` not supported here.")
+
+    def cmd_scroll(self, arg):
+        ok = os_bridge.mouse_scroll(dy=5 if arg.strip().lower() == "up" else -5)
+        return _result(f"🖱️ Scrolled {arg}" if ok else "⚠️ Scroll failed")
+
+    def cmd_windows(self, arg):
+        titles = [t for _, t in os_bridge.list_windows()]
+        if not titles:
+            return _result("No open windows found.")
+        return _result("🪟 *Open windows:*\n" + "\n".join(f"• {t[:80]}" for t in titles[:40]))
+
+    def cmd_power(self, arg):
+        labels = {"sleep": "Put the PC to sleep", "restart": "Restart the PC (in 15 s)", "shutdown": "Shut down the PC (in 15 s)"}
+        if arg not in labels:
+            return _result(f"⚠️ Unknown power action `{arg}`")
+        if not self._approve(labels[arg], "The PC will go offline and the bot will stop responding."):
+            return _result(f"❌ {arg.capitalize()} cancelled.")
+        res = os_bridge.power_action(arg)
+        return _result(f"⚡ {labels[arg]}…" if res["exit_code"] == 0 else f"⚠️ {res['stderr']}")
 
     def cmd_screenshot(self, arg):
         out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time() * 1000)}.jpg"
