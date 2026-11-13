@@ -23,6 +23,23 @@ IS_WINDOWS = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 
 
+def attach_to_input_desktop() -> bool:
+    """Attaches current thread to the interactive user desktop ('Default').
+    Prevents background process isolation from rendering black screenshots and dropping input.
+    """
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            h_input = u32.OpenInputDesktop(0, False, 0x01FF)
+            if h_input:
+                u32.SetThreadDesktop(h_input)
+                return True
+        except Exception as e:
+            print(f"[Desktop] attach_to_input_desktop error: {e}")
+    return False
+
+
 def run_command(cmd: str, cwd: str = None, timeout: int = 45) -> dict:
     """Executes a shell command (PowerShell on Windows, Bash on Mac/Linux)."""
     try:
@@ -102,13 +119,26 @@ def take_screenshot(output_path: Path) -> bool:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    attach_to_input_desktop()
+
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
     # Method 1: Pillow ImageGrab
     try:
         from PIL import ImageGrab
         img = ImageGrab.grab()
-        if img:
+        if img and img.size[0] > 0 and img.size[1] > 0:
             img.save(str(output_path), "JPEG", quality=85)
-            return True
+            if output_path.exists() and output_path.stat().st_size > 20000:
+                return True
     except Exception:
         pass
 
@@ -650,3 +680,125 @@ def focus_window(title_query: str) -> bool:
         return run_command(script)["exit_code"] == 0
 
     return False
+
+
+def set_clipboard(text: str) -> bool:
+    """Sets system clipboard text using native Win32/macOS APIs."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            u32 = ctypes.windll.user32
+            k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+            k32.GlobalAlloc.restype = ctypes.c_void_p
+            k32.GlobalLock.argtypes = [ctypes.c_void_p]
+            k32.GlobalLock.restype = ctypes.c_void_p
+            k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+            if not u32.OpenClipboard(0):
+                return False
+            u32.EmptyClipboard()
+            data = (text + '\0').encode('utf-16le')
+            h = k32.GlobalAlloc(0x0042, len(data))
+            if h:
+                p = k32.GlobalLock(h)
+                ctypes.memmove(p, data, len(data))
+                k32.GlobalUnlock(h)
+                u32.SetClipboardData(13, h)  # CF_UNICODETEXT
+            u32.CloseClipboard()
+            return True
+        except Exception as e:
+            print(f"[Clipboard] Error: {e}")
+            return False
+    elif IS_MAC:
+        p = subprocess.Popen(['pbcopy'], stdin=subprocess.PIPE)
+        p.communicate(input=text.encode('utf-8'))
+        return p.returncode == 0
+    return False
+
+
+def focus_and_maximize_window(query: str = "edge") -> bool:
+    """Finds window matching query, restores & maximizes it, and brings to foreground."""
+    q = query.lower().strip()
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            found_hwnd = None
+
+            def enum_proc(hwnd, lparam):
+                nonlocal found_hwnd
+                if u32.IsWindowVisible(hwnd):
+                    length = u32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        u32.GetWindowTextW(hwnd, buff, length + 1)
+                        if q in buff.value.lower():
+                            found_hwnd = hwnd
+                            return False
+                return True
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            u32.EnumWindows(WNDENUMPROC(enum_proc), 0)
+            if found_hwnd:
+                u32.ShowWindow(found_hwnd, 3)  # SW_MAXIMIZE = 3
+                u32.SetForegroundWindow(found_hwnd)
+                time.sleep(0.5)
+                return True
+        except Exception as e:
+            print(f"[GUI] focus_and_maximize error: {e}")
+    return False
+
+
+def automate_chatgpt(prompt: str, new_chat: bool = True) -> dict:
+    """Automates Microsoft Edge to open ChatGPT, start a fresh conversation, enter prompt, and submit."""
+    # 1. Launch / Focus Edge with ChatGPT
+    launch_app("edge chatgpt")
+    time.sleep(3.5)
+
+    # 2. Maximize and bring Edge to foreground
+    focus_and_maximize_window("edge")
+    time.sleep(0.5)
+
+    # 3. New Chat if requested
+    if new_chat:
+        press_hotkey("ctrl+shift+o")  # ChatGPT shortcut for New Chat
+        time.sleep(1.5)
+
+    # 4. Focus prompt box: click in center bottom area or press '/'
+    width, height = 1920, 1200
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            width = ctypes.windll.user32.GetSystemMetrics(0)
+            height = ctypes.windll.user32.GetSystemMetrics(1)
+        except Exception:
+            pass
+
+    target_x = int(width * 0.5)
+    target_y = int(height * 0.88)
+    with UserInputLock("ChatGPT Automate"):
+        mouse_click(target_x, target_y)
+        time.sleep(0.3)
+
+        # 5. Inject prompt via clipboard
+        set_clipboard(prompt)
+        time.sleep(0.2)
+        press_hotkey("ctrl+v")
+        time.sleep(0.5)
+
+        # 6. Submit prompt
+        press_key("enter")
+
+    time.sleep(5.0)
+
+    # 7. Capture result screenshot
+    out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time())}.jpg"
+    take_screenshot(out_file)
+
+    return {
+        "success": True,
+        "screenshot": str(out_file) if out_file.exists() else None,
+        "prompt": prompt
+    }

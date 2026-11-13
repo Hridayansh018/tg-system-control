@@ -48,18 +48,12 @@ Available Tools:
 11. `type_text`: Types plain text into the active focused window. Parameters: `{"text": "string"}`.
 12. `press_key`: Presses a special key. Parameters: `{"key": "enter"|"tab"|"esc"|"space"|"backspace"}`.
 13. `press_hotkey`: Presses a hotkey combination. Parameters: `{"hotkey": "ctrl+c"|"ctrl+v"|"ctrl+w"|"alt+tab"|"win+d"}`.
+14. `automate_chatgpt`: Direct tool to open ChatGPT in Microsoft Edge, start a new chat, enter prompt, submit it, and capture screenshot. Parameters: `{"prompt": "string", "new_chat": bool}`.
 
 CRITICAL RULES FOR MULTI-STEP AUTOMATION:
-- When the user asks to DO something in an app (e.g. "generate thumbnails using chatgpt", "search youtube for song", "open notepad and write note"):
-  NEVER just launch the app and stop! You MUST output the ENTIRE action pipeline in your JSON `actions` array:
-  [
-    {"action": "launch_app", "parameters": {"app_name": "chatgpt"}},
-    {"action": "type_text", "parameters": {"text": "Generate 3 eye-catching YouTube thumbnail concepts for..."}},
-    {"action": "press_key", "parameters": {"key": "enter"}},
-    {"action": "take_screenshot"}
-  ]
-- Do NOT say "Abhi main prompt type kar deta hoon" in your message unless `type_text` is included in the JSON `actions` array!
-- If the app is already opened, use `focus_window`, followed by `type_text`, `press_key`, and `take_screenshot`.
+- For requests involving ChatGPT (e.g. "open chatgpt and generate thumbnails", "generate 3 thumbnails for luffy in chatgpt"):
+  You can either return `{"action": "automate_chatgpt", "parameters": {"prompt": "Detailed thumbnail prompt...", "new_chat": true}}` OR use the sequence: `launch_app` -> `type_text` -> `press_key: enter` -> `take_screenshot`.
+- When the user asks to DO something in an app: NEVER just launch the app and stop! Always include typing, submitting, and screenshotting in one response.
 
 If the user asks a normal question that requires no tool execution, just reply with helpful text normally.
 Be concise, helpful, and speak in Hinglish/English as the user prefers.
@@ -158,21 +152,34 @@ class HermesAgent:
             }
 
         # 6. Launch App (/open or open or kholo or start)
-        if any(user_lower.startswith(p) for p in ["/open ", "/launch ", "open ", "launch ", "start "]) or any(k in user_lower for k in [" open karo", " kholo", " chalao"]):
+        # CRITICAL: Only trigger simple app launch if it is NOT a complex instruction with actions!
+        action_indicators = [
+            "generate", "thumbnail", "prompt", "video", "write", "search", "type", "click",
+            "create", "banao", "dalo", "likho", "chat", "new chat", "then", "and", "karke",
+            "send", "dikhao", "review", "wha", "wahan", "pe", "par", "me", "mein", "aur",
+            "image", "photo", "pic", "make", "find", "luffy", "marinford"
+        ]
+        is_complex = any(w in user_lower for w in action_indicators)
+
+        if not is_complex and (
+            any(user_lower.startswith(p) for p in ["/open ", "/launch ", "open ", "launch ", "start "])
+            or any(user_lower.endswith(k) for k in [" open karo", " kholo", " chalao"])
+        ):
             # Extract app name
             app = re.sub(r"^(/open\s+|/launch\s+|open\s+|launch\s+|start\s+)", "", user_text, flags=re.IGNORECASE).strip()
             app = re.sub(r"\s+(open karo|kholo|chalao)$", "", app, flags=re.IGNORECASE).strip()
-            res = os_bridge.launch_app(app)
-            memory_logger.log_entry(
-                "APP_LAUNCH",
-                f"Launched application: {app}",
-                details={"app": app, "exit_code": res["exit_code"]},
-                thinking=f"Launching application '{app}' on workstation."
-            )
-            if res["exit_code"] == 0:
-                return {"text": f"🚀 Launched *{app}* on PC!", "photo": None}
-            else:
-                return {"text": f"⚠️ Could not launch *{app}*: {res['stderr']}", "photo": None}
+            if len(app.split()) <= 3:
+                res = os_bridge.launch_app(app)
+                memory_logger.log_entry(
+                    "APP_LAUNCH",
+                    f"Launched application: {app}",
+                    details={"app": app, "exit_code": res["exit_code"]},
+                    thinking=f"Launching application '{app}' on workstation."
+                )
+                if res["exit_code"] == 0:
+                    return {"text": f"🚀 Launched *{app}* on PC!", "photo": None}
+                else:
+                    return {"text": f"⚠️ Could not launch *{app}*: {res['stderr']}", "photo": None}
 
         # 6b. Close App / Window / Tab (/close or close or band karo or kill)
         if any(user_lower.startswith(p) for p in ["/close ", "/kill ", "close ", "kill "]) or any(k in user_lower for k in [" band karo", " hatao", " close karo"]):
@@ -286,7 +293,15 @@ class HermesAgent:
                     act = item.get("action")
                     params = item.get("parameters", {})
 
-                    if act == "launch_app":
+                    if act == "automate_chatgpt":
+                        prm = params.get("prompt", "")
+                        nc = params.get("new_chat", True)
+                        res = os_bridge.automate_chatgpt(prm, new_chat=nc)
+                        if res.get("screenshot"):
+                            photo_to_send = res["screenshot"]
+                        executed_logs.append(f"Automated ChatGPT with prompt: `{prm[:50]}...`")
+
+                    elif act == "launch_app":
                         app = params.get("app_name", "")
                         os_bridge.launch_app(app)
                         executed_logs.append(f"Launched {app}")
