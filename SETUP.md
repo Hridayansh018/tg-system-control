@@ -12,9 +12,11 @@ Please read the SETUP.md file, set up this project on my computer with Bot Token
 ```
 1. Parse `Bot Token` and `Chat ID` from the prompt and inject them into `.env`.
 2. Verify Python version is `>= 3.10`.
-3. Create a virtual environment (`python -m venv .venv`).
-4. Install minimal dependencies (`pip install requests Pillow`).
-5. Ensure `.env` is created from `.env.example` with valid credentials.
+3. Create a virtual environment (`python -m venv .venv`) and install minimal dependencies (`pip install requests Pillow`).
+4. Ensure `.env` is created from `.env.example` with valid credentials.
+5. **Install Official Hermes Desktop App (Mandatory for Every Setup):**
+   - Run `install_hermes_app.bat` (or clone `https://github.com/nousresearch/hermes-agent`, run `setup-hermes.ps1 -RuntimeOnly`, build via `hermes desktop --build-only`).
+   - Ensure `Hermes Agent.lnk` desktop shortcut is created pointing to `Hermes.exe` with the official icon (`apps\desktop\assets\icon.ico`).
 6. Run `python setup_check.py` to verify all components pass.
 7. Follow the platform-specific autostart or launcher steps.
 
@@ -152,7 +154,36 @@ LLM_PROVIDER=offline
 
 ---
 
-## 🔍 4. Automated Environment Verification
+## 🦅 4. Installing the Official Hermes Agent Desktop App (Required for Every Setup)
+
+Every time this workstation setup is prepared on a computer, the official **Nous Research Hermes Agent Desktop Application** must be installed and linked alongside the Telegram controller:
+
+### Quick 1-Click Installation (Windows)
+Double-click `install_hermes_app.bat` in the repository root. It will:
+1. Clone the official repository from `https://github.com/nousresearch/hermes-agent`.
+2. Bootstrap the isolated Hermes runtime and PM toolchain (`setup-hermes.ps1 -RuntimeOnly`).
+3. Compile and package the standalone Electron desktop application (`hermes desktop --build-only`).
+4. Generate the `Hermes Agent.lnk` Desktop & Start Menu shortcuts pointing to `Hermes.exe` with the official icon (`apps\desktop\assets\icon.ico`).
+
+### Manual Setup Commands:
+```powershell
+# 1. Clone official repository
+git clone --depth 1 https://github.com/nousresearch/hermes-agent.git D:\git-data\hermes-agent
+cd D:\git-data\hermes-agent
+
+# 2. Run PM toolchain bootstrap
+powershell -ExecutionPolicy Bypass -File .\setup-hermes.ps1 -RuntimeOnly
+
+# 3. Build standalone Electron desktop application
+powershell -ExecutionPolicy Bypass -Command ". .\activate.ps1; hermes desktop --build-only"
+
+# 4. Standalone binary created:
+# D:\git-data\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe
+```
+
+---
+
+## 🔍 5. Automated Environment Verification
 
 Before running the bot, always execute the built-in verifier:
 ```bash
@@ -172,7 +203,7 @@ If all items print `[✅ PASS]`, your system is fully certified to run!
 
 ---
 
-## 🧠 5. Project Memory Logging (`memory.md`)
+## 🧠 6. Project Memory Logging (`memory.md`)
 
 During setup, an append-only constructive memory file (`memory.md`) is automatically created at the repository root.
 
@@ -183,7 +214,7 @@ During setup, an append-only constructive memory file (`memory.md`) is automatic
 
 ---
 
-## 🏃 6. How to Run the Bot
+## 🏃 7. How to Run the Bot
 
 ### Interactive Mode (Console Window)
 - **Windows:** Double-click `start_agent.bat` or run:

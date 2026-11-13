@@ -107,7 +107,8 @@ tg-system-control/
 ├── start_agent_silent.vbs    # Silent background launcher (Windows, 0 black windows)
 ├── stop_agent.bat            # 1-Click process killer (Windows)
 ├── install_autostart.bat     # Installs auto-launch shortcut to Windows Startup
-└── uninstall_autostart.bat   # Removes auto-launch shortcut
+├── uninstall_autostart.bat   # Removes auto-launch shortcut
+└── install_hermes_app.bat    # 1-Click installer for official Nous Research Hermes Desktop App
 ```
 
 ---
