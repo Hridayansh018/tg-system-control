@@ -125,13 +125,55 @@ $bitmap.Dispose()
     return False
 
 
+WEB_SHORTCUTS = {
+    "gmail": "https://mail.google.com",
+    "mail": "https://mail.google.com",
+    "google": "https://google.com",
+    "youtube": "https://youtube.com",
+    "yt": "https://youtube.com",
+    "youtube studio": "https://studio.youtube.com",
+    "yt studio": "https://studio.youtube.com",
+    "chatgpt": "https://chatgpt.com",
+    "github": "https://github.com",
+    "whatsapp": "https://web.whatsapp.com",
+    "hark": "https://hark.com",
+    "muse": "https://muse.ai",
+}
+
+
 def launch_app(app_name: str) -> dict:
-    """Launches an application by common name or executable path."""
+    """Launches an application or website by common name, URL, or executable path."""
     app_lower = app_name.lower().strip()
+
+    # 1. Check for Web / URL / Website requests (e.g. 'edge : open gmail app' or 'open youtube')
+    target_url = None
+    for site_key, site_url in WEB_SHORTCUTS.items():
+        if site_key in app_lower:
+            target_url = site_url
+            break
+
+    # If direct URL passed
+    if "http://" in app_lower or "https://" in app_lower:
+        for part in app_name.split():
+            if part.startswith(("http://", "https://")):
+                target_url = part
+                break
+
+    if target_url:
+        # Determine preferred browser
+        browser = "msedge" if "edge" in app_lower else ("chrome" if "chrome" in app_lower else "msedge" if IS_WINDOWS else "safari")
+        if IS_WINDOWS:
+            return run_command(f'start {browser} "{target_url}"')
+        elif IS_MAC:
+            app_flag = "-a 'Google Chrome'" if "chrome" in app_lower else ("-a 'Microsoft Edge'" if "edge" in app_lower else "")
+            return run_command(f'open {app_flag} "{target_url}"')
+
+    # 2. Local Applications Map
     if IS_WINDOWS:
         app_map = {
             "chrome": "start chrome",
             "edge": "start msedge",
+            "msedge": "start msedge",
             "antigravity": r'start "" "$env:LOCALAPPDATA\Programs\antigravity\Antigravity.exe"',
             "antigravity ide": r'start "" "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe"',
             "vscode": "code",
@@ -142,7 +184,12 @@ def launch_app(app_name: str) -> dict:
             "taskmgr": "taskmgr",
             "task manager": "taskmgr",
         }
-        cmd = app_map.get(app_lower, f"start '{app_name}'")
+        # Check if any mapped app is in the text (e.g. 'open edge app' -> 'edge')
+        for k, cmd in app_map.items():
+            if k in app_lower.split():
+                return run_command(cmd)
+
+        cmd = app_map.get(app_lower, f'start "{app_name}"')
         return run_command(cmd)
     elif IS_MAC:
         app_map = {
@@ -151,6 +198,10 @@ def launch_app(app_name: str) -> dict:
             "safari": "open -a 'Safari'",
             "terminal": "open -a 'Terminal'",
         }
+        for k, cmd in app_map.items():
+            if k in app_lower.split():
+                return run_command(cmd)
+
         cmd = app_map.get(app_lower, f"open -a '{app_name}'")
         return run_command(cmd)
     return {"exit_code": -1, "stdout": "", "stderr": "Unsupported platform"}
