@@ -136,7 +136,18 @@ If all items print `[✅ PASS]`, your system is fully certified to run!
 
 ---
 
-## 🏃 5. How to Run the Bot
+## 🧠 5. Project Memory Logging (`memory.md`)
+
+During setup, an append-only constructive memory file (`memory.md`) is automatically created at the repository root.
+
+### Rules of `memory.md`:
+1. **Append-Only (Constructive Writes Only):** Every action, command execution, agent reasoning thought, completed task, and system lifecycle event (startup, shutdown, network interruption) is appended chronologically.
+2. **Never Deleted or Truncated:** The file is permanent and protected. No purge or deletion operations are permitted.
+3. **Strictly Git-Ignored:** Added to `.gitignore` so your personal command history and desktop logs are never committed to GitHub.
+
+---
+
+## 🏃 6. How to Run the Bot
 
 ### Interactive Mode (Console Window)
 - **Windows:** Double-click `start_agent.bat` or run:

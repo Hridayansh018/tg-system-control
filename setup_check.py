@@ -67,8 +67,8 @@ def main():
         except ImportError:
             check_step(f"Optional: {opt_pkg}", True, "Not installed (Native OS bridge will be used)")
 
-    # 4. Configuration Check (.env)
-    banner("CONFIGURATION CHECK (.env)")
+    # 4. Configuration Check (.env) & Memory.md Initialization
+    banner("CONFIGURATION & MEMORY CHECK")
     if not ENV_FILE.exists():
         if ENV_EXAMPLE.exists():
             shutil.copy(ENV_EXAMPLE, ENV_FILE)
@@ -95,6 +95,18 @@ def main():
     all_ok &= check_step("Authorized Chat ID", chat_ok, chat_id if chat_ok else "Missing in .env")
 
     check_step("Configured LLM Brain", True, f"Provider = '{provider}'")
+
+    # Constructive Memory Initialization
+    try:
+        from core import memory_logger
+        memory_logger.ensure_memory_file()
+        mem_exists = (ROOT / "memory.md").exists()
+        gitignore_text = (ROOT / ".gitignore").read_text(encoding="utf-8") if (ROOT / ".gitignore").exists() else ""
+        mem_ignored = "memory.md" in gitignore_text
+        all_ok &= check_step("Constructive memory.md", mem_exists, "Initialized (Append-only)")
+        all_ok &= check_step("Git-ignored memory.md", mem_ignored, "Safe from Git commits")
+    except Exception as e:
+        all_ok &= check_step("Constructive memory.md", False, str(e))
 
     # 5. OS Bridge & Hardware Actions Test
     banner("HARDWARE & OS ACTIONS TEST")

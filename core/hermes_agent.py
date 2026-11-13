@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import os_bridge
 from . import llm_router
+from . import memory_logger
 import config
 
 SYSTEM_PROMPT = """You are Hermes Agent, a powerful desktop AI assistant running locally on the user's computer.
@@ -51,6 +52,12 @@ class HermesAgent:
         if any(k in user_lower for k in ["screenshot", "screen shot", "/shot", "ss bhejo", "screen capture", "desktop dikhao"]):
             out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time())}.jpg"
             ok = os_bridge.take_screenshot(out_file)
+            memory_logger.log_entry(
+                "DESKTOP_ACTION",
+                "Captured Desktop Screenshot",
+                details={"file": out_file.name, "success": ok},
+                thinking=f"User asked '{user_text}'. Triggering screen capture and sending photo."
+            )
             if ok and out_file.exists():
                 return {
                     "text": "📸 *Desktop Screenshot Captured!*",
@@ -62,6 +69,12 @@ class HermesAgent:
         # 2. System Status / Metrics
         if any(k in user_lower for k in ["status", "/status", "pc status", "ram", "cpu", "disk", "specs", "system stats"]):
             stats = os_bridge.get_system_stats()
+            memory_logger.log_entry(
+                "HARDWARE_METRICS",
+                "Collected Hardware Specs & Resource Utilization",
+                details=stats,
+                thinking=f"User asked for system status. Polled CPU ({stats.get('cpu_cores')} cores), RAM ({stats.get('ram_used_pct')}%), and storage."
+            )
             reply = (
                 f"💻 *SYSTEM HARDWARE & RESOURCE STATUS*\n\n"
                 f"🖥️ *OS:* `{stats.get('os')}` ({stats.get('architecture')})\n"
@@ -78,11 +91,22 @@ class HermesAgent:
         # 3. Top Processes
         if any(k in user_lower for k in ["process", "processes", "taskmgr", "task manager", "/proc"]):
             proc_out = os_bridge.list_top_processes(limit=8)
+            memory_logger.log_entry(
+                "PROCESS_INSPECTION",
+                "Queried Top Running Processes",
+                details={"limit": 8},
+                thinking="Inspected CPU/Memory consuming processes."
+            )
             return {"text": f"📋 *TOP RUNNING PROCESSES:*\n```text\n{proc_out[:3500]}\n```", "photo": None}
 
         # 4. Lock PC
         if any(k in user_lower for k in ["lock pc", "lock screen", "/lock"]):
             os_bridge.lock_workstation()
+            memory_logger.log_entry(
+                "SECURITY_ACTION",
+                "Locked Workstation",
+                thinking="User instructed remote screen lock via Telegram."
+            )
             return {"text": "🔒 *Workstation Locked successfully!*", "photo": None}
 
         # 5. Direct Shell Execution (/exec or /run)
@@ -91,6 +115,12 @@ class HermesAgent:
             res = os_bridge.run_command(cmd)
             out_str = (res["stdout"] or res["stderr"] or "Command executed with no output.")[:3500]
             status_icon = "✅" if res["exit_code"] == 0 else "⚠️"
+            memory_logger.log_entry(
+                "SHELL_COMMAND",
+                f"Executed: {cmd}",
+                details={"exit_code": res["exit_code"], "output_preview": out_str[:250]},
+                thinking=f"Executing remote shell command from Telegram: {cmd}"
+            )
             return {
                 "text": f"{status_icon} *Command Output (Exit code {res['exit_code']}):*\n```text\n{out_str}\n```",
                 "photo": None
@@ -100,6 +130,12 @@ class HermesAgent:
         if user_text.startswith(("/open ", "/launch ", "open ", "launch ")):
             app = re.sub(r"^(/open |/launch |open |launch )", "", user_text).strip()
             res = os_bridge.launch_app(app)
+            memory_logger.log_entry(
+                "APP_LAUNCH",
+                f"Launched application: {app}",
+                details={"app": app, "exit_code": res["exit_code"]},
+                thinking=f"Launching application '{app}' on workstation."
+            )
             if res["exit_code"] == 0:
                 return {"text": f"🚀 Launched *{app}* on PC!", "photo": None}
             else:

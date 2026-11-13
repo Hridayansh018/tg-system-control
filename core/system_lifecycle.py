@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 import config
 from bot import telegram_client
 from core import os_bridge
+from core import memory_logger
 
 STATUS_MSG_FILE = config.TEMP_DIR / ".status_msg_id"
 IS_WINDOWS = platform.system() == "Windows"
@@ -66,6 +67,17 @@ def notify_online():
     # 2. Update Bot Profile Status
     update_bot_bio("🟢 System ONLINE")
     print("🟢 [ONLINE] Desktop connection notification sent to Telegram.")
+    memory_logger.log_entry(
+        "LIFECYCLE_EVENT",
+        "System Came ONLINE",
+        details={
+            "os": stats.get("os"),
+            "cpu_cores": stats.get("cpu_cores"),
+            "ram_used_pct": stats.get("ram_used_pct"),
+            "disk_free_gb": stats.get("disk_free_gb")
+        },
+        thinking="Desktop initialized, listeners primed, Telegram Bot bio updated to ONLINE."
+    )
 
 
 def notify_offline(reason="Desktop shut down / Agent stopped"):
@@ -90,6 +102,12 @@ def notify_offline(reason="Desktop shut down / Agent stopped"):
         pass
 
     print(f"🔴 [OFFLINE] Desktop disconnection recorded ({reason}).")
+    memory_logger.log_entry(
+        "LIFECYCLE_EVENT",
+        f"System Went OFFLINE ({reason})",
+        details={"reason": reason, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
+        thinking="System shutdown, process interrupt, or user logoff detected. Cleaning up and notifying Telegram."
+    )
 
 
 # ----------------------------------------------------------------------
