@@ -33,10 +33,7 @@ def main():
     # 1. Register shutdown and logoff hooks
     system_lifecycle.register_lifecycle_hooks()
 
-    # 2. Dispatch ONLINE notification & set bot bio status
-    system_lifecycle.notify_online()
-
-    # 3. Start auto-restarting supervisor loop
+    # 2. Start auto-restarting supervisor loop (warm-up & ONLINE ping handled after all files/packages load)
     while True:
         try:
             run_bot_loop()

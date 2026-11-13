@@ -11,10 +11,55 @@ Remotely monitor your machine, run terminal commands, capture live desktop scree
 Copy and paste this prompt to your AI coding agent to set up this repository effortlessly on any computer:
 
 ```text
-Please read the SETUP.md file, set up this project on my computer, and configure the AI engine to be powered by <"specify model: e.g., gemini / claude / openrouter / offline">.
+Please read the SETUP.md file, set up this project on my computer with Bot Token: <YOUR_BOT_TOKEN> and Chat ID: <YOUR_CHAT_ID>, and configure the AI engine to be powered by <"specify model: e.g., gemini / claude / openrouter / offline">.
 ```
 
-The agent will read [SETUP.md](file:///D:/git-data/tg-system-control/SETUP.md), detect your OS, install dependencies, configure environment variables, and run `python setup_check.py` to certify readiness.
+The agent will read [SETUP.md](file:///D:/git-data/tg-system-control/SETUP.md), detect your OS, install dependencies, configure environment variables, run pre-flight warm-up tests, and certify readiness.
+
+---
+
+## 📱 How to Get Your Telegram Bot Token & Chat ID
+
+Before running the agent, you need a Telegram Bot and your personal Chat ID:
+
+### Step 1: Create a Bot via @BotFather
+1. Open Telegram and search for **[@BotFather](https://t.me/BotFather)** (the official verified bot).
+2. Press **Start** (or send `/start`), then send `/newbot`.
+3. Enter a friendly name for your bot (e.g. `My Desktop Controller`).
+4. Enter a unique username ending in `bot` (e.g. `my_studio_pc_bot`).
+5. BotFather will provide your **HTTP API Token** (e.g. `9236178910:AAEw5v7lZwlvJ8AkaJ9vOlbknnyOb8qQmqY`). Save this token!
+
+### Step 2: Get Your Personal Chat ID (Zero-Trust Security)
+1. In Telegram, search for **[@userinfobot](https://t.me/userinfobot)** or **[@raw_data_bot](https://t.me/raw_data_bot)**.
+2. Send `/start`.
+3. It will immediately reply with your numerical **`Id`** (e.g. `7166744280`).
+4. This ensures only YOU can control your workstation. Any other Telegram user who attempts to message your bot receives `⛔ Access Denied`.
+
+### Step 3: Use the Credentials in the Setup Prompt
+Replace `<YOUR_BOT_TOKEN>` and `<YOUR_CHAT_ID>` in the prompt above and send it to your AI agent!
+
+---
+
+## ⚡ Zero-Latency Pre-Flight Warm-Up
+
+To eliminate command lag and latency:
+- When starting TG-System-Control (manually or via Windows boot), **all required packages, display contexts, input bridges, and universal application catalogs are pre-loaded and warmed up in memory first**.
+- **Telegram is pinged with `🟢 SYSTEM ONLINE ⚡` ONLY AFTER every single script, package, and engine is 100% verified and primed.**
+- The initial ping includes a benchmark report showing warm-up time (e.g. `⚡ Zero-Latency Warm-Up: ~840 ms`), indexed applications count, and Telegram API latency.
+
+---
+
+## 🖥️ Universal Desktop App Control (Open & Close ANY App)
+
+You can launch and close **ANY** application or website installed on your desktop:
+
+| Action | Example Telegram Commands | What Happens on Your PC |
+|---|---|---|
+| **Open App** | `open spotify`, `open edge`, `open discord`, `open notepad`, `open calculator`, `open hermes` | Resolves from universal Windows app catalog (140+ Win32, Store, and PWA apps) and displays GUI window. |
+| **Open Website / PWA** | `open youtube`, `open edge gmail app`, `open youtube studio` | Launches dedicated web interface or standalone Edge PWA window. |
+| **Close App** | `close spotify`, `close edge`, `close notepad`, `close calc` | Gracefully closes the matching running process and terminates any hung instances. |
+| **Close Tab / Site** | `close youtube studio`, `close tab`, `close gmail` | Safely sends `Ctrl+W` to close the active web tab. |
+| **Fallback Window Close** | `close window`, `hatao`, `band karo` | Sends `Alt+F4` to close the active frontmost window. |
 
 ---
 

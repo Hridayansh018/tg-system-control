@@ -7,7 +7,17 @@ import shutil
 import subprocess
 import sys
 import time
+import json
+import re
 from pathlib import Path
+from typing import Optional, Dict, Any
+
+try:
+    import config
+except ImportError:
+    ROOT = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(ROOT))
+    import config
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
@@ -141,18 +151,93 @@ WEB_SHORTCUTS = {
 }
 
 
+_APPS_CACHE = {}
+
+
+def refresh_installed_apps_cache() -> dict:
+    """Discovers and caches all installed applications on Windows (Win32, Store, and PWA apps)."""
+    global _APPS_CACHE
+    if not IS_WINDOWS:
+        return {}
+
+    cache_file = config.TEMP_DIR / "apps_cache.json"
+    apps = {}
+
+    try:
+        ps_cmd = 'Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress'
+        res = run_command(ps_cmd, timeout=8)
+        if res["exit_code"] == 0 and res["stdout"]:
+            data = json.loads(res["stdout"])
+            if isinstance(data, dict):
+                data = [data]
+            for item in data:
+                name = item.get("Name", "").strip()
+                appid = item.get("AppID", "").strip()
+                if name and appid:
+                    apps[name.lower()] = appid
+    except Exception as e:
+        print(f"[OS_Bridge] Warning refreshing apps cache: {e}")
+
+    _APPS_CACHE = apps
+    if apps:
+        try:
+            cache_file.write_text(json.dumps(apps, indent=2))
+        except Exception:
+            pass
+    return _APPS_CACHE
+
+
+def get_installed_apps() -> dict:
+    """Returns cached installed apps catalog, populating it if not already loaded."""
+    global _APPS_CACHE
+    if _APPS_CACHE:
+        return _APPS_CACHE
+
+    cache_file = config.TEMP_DIR / "apps_cache.json"
+    if cache_file.exists():
+        try:
+            _APPS_CACHE = json.loads(cache_file.read_text())
+            if _APPS_CACHE:
+                return _APPS_CACHE
+        except Exception:
+            pass
+
+    return refresh_installed_apps_cache()
+
+
+def find_app_id(query: str) -> Optional[str]:
+    """Finds best matching AppID for a given application query."""
+    apps = get_installed_apps()
+    q = query.lower().strip()
+
+    # 1. Exact match
+    if q in apps:
+        return apps[q]
+
+    # 2. Word match / starts-with match
+    for name, appid in apps.items():
+        if name.startswith(q) or f" {q} " in f" {name} " or f" {q}" in name:
+            return appid
+
+    # 3. Substring match
+    for name, appid in apps.items():
+        if q in name:
+            return appid
+
+    return None
+
+
 def launch_app(app_name: str) -> dict:
-    """Launches an application or website on the user's interactive desktop."""
+    """Launches ANY application or website on the user's interactive desktop."""
     app_lower = app_name.lower().strip()
 
-    # 1. Check for Web / URL / Website requests (e.g. 'edge : open gmail app' or 'open youtube')
+    # 1. Check for Web / URL / Website requests
     target_url = None
     for site_key, site_url in WEB_SHORTCUTS.items():
         if site_key in app_lower:
             target_url = site_url
             break
 
-    # If direct URL passed
     if "http://" in app_lower or "https://" in app_lower:
         for part in app_name.split():
             if part.startswith(("http://", "https://")):
@@ -164,7 +249,6 @@ def launch_app(app_name: str) -> dict:
         if IS_WINDOWS:
             try:
                 if is_app_mode:
-                    # Launch standalone native PWA window via Edge
                     subprocess.Popen(f'cmd.exe /c start msedge --app="{target_url}"', shell=True)
                 else:
                     os.startfile(f"microsoft-edge:{target_url}")
@@ -175,8 +259,21 @@ def launch_app(app_name: str) -> dict:
             app_flag = "-a 'Google Chrome'" if "chrome" in app_lower else ("-a 'Microsoft Edge'" if "edge" in app_lower else "")
             return run_command(f'open {app_flag} "{target_url}"')
 
-    # 2. Local Applications Map (Using Windows ShellExecute via os.startfile for direct GUI display)
+    # 2. Windows Universal App Resolver (Matches ANY installed Win32/Store/PWA app)
     if IS_WINDOWS:
+        # Check universal catalog first
+        clean_query = re.sub(r"\.(exe|app|lnk)$", "", app_lower).strip()
+        matched_appid = find_app_id(clean_query)
+        if matched_appid:
+            try:
+                os.startfile(f"shell:AppsFolder\\{matched_appid}")
+                return {"exit_code": 0, "stdout": f"Launched '{app_name}' via AppID ({matched_appid})", "stderr": ""}
+            except Exception as e:
+                res = run_command(f'explorer.exe "shell:AppsFolder\\{matched_appid}"')
+                if res["exit_code"] == 0:
+                    return {"exit_code": 0, "stdout": f"Launched '{app_name}' via Explorer shell", "stderr": ""}
+
+        # Direct executable / command fallback
         app_exec_map = {
             "edge": "msedge.exe",
             "msedge": "msedge.exe",
@@ -188,15 +285,20 @@ def launch_app(app_name: str) -> dict:
             "taskmgr": "taskmgr.exe",
             "task manager": "taskmgr.exe",
             "antigravity": os.path.expandvars(r"%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe"),
+            "hermes": r"D:\git-data\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe",
             "vscode": "code.cmd",
+            "code": "code.cmd",
+            "cmd": "cmd.exe",
+            "powershell": "powershell.exe",
+            "terminal": "wt.exe",
+            "paint": "mspaint.exe",
         }
         for k, target_exe in app_exec_map.items():
-            if k in app_lower.split() or k == app_lower:
+            if k in clean_query.split() or k == clean_query:
                 try:
                     os.startfile(target_exe)
                     return {"exit_code": 0, "stdout": f"Launched {k} on desktop", "stderr": ""}
-                except Exception as e:
-                    # Fallback to shell start
+                except Exception:
                     return run_command(f'start "" "{target_exe}"')
 
         # Generic launch fallback
@@ -219,6 +321,64 @@ def launch_app(app_name: str) -> dict:
 
         cmd = app_map.get(app_lower, f"open -a '{app_name}'")
         return run_command(cmd)
+
+    return {"exit_code": -1, "stdout": "", "stderr": "Unsupported platform"}
+
+
+def close_app(target_name: str) -> dict:
+    """Closes ANY active window, tab, or application on desktop."""
+    target_lower = target_name.lower().strip()
+    clean_target = re.sub(r"\.(exe|app)$", "", target_lower).strip()
+
+    # 1. Tab / Web specific close (e.g. 'close youtube studio', 'close tab')
+    if any(k in target_lower for k in ["tab", "youtube", "studio", "gmail", "mail", "web", "site"]):
+        with UserInputLock("Close Tab"):
+            press_hotkey("ctrl+w")
+        return {"exit_code": 0, "stdout": f"Closed tab for '{target_name}' (Ctrl+W)", "stderr": ""}
+
+    if IS_WINDOWS:
+        # 2. Universal Windows Process and Window Terminator
+        # Searches by ProcessName, MainWindowTitle, or executable name
+        ps_close = f"""
+$target = '{clean_target}'
+$procs = Get-Process | Where-Object {{
+    $_.ProcessName -like "*$target*" -or
+    $_.MainWindowTitle -like "*$target*" -or
+    $_.Description -like "*$target*"
+}}
+
+if ($procs) {{
+    $closedCount = 0
+    foreach ($p in $procs) {{
+        try {{
+            $p.CloseMainWindow() | Out-Null
+            Start-Sleep -Milliseconds 200
+            if (-not $p.HasExited) {{
+                $p.Kill()
+            }}
+            $closedCount++
+        }} catch {{
+            try {{ Stop-Process -Id $p.Id -Force }} catch {{}}
+        }}
+    }}
+    Write-Output "Successfully closed $closedCount instance(s) matching '$target'"
+}} else {{
+    # If no named process matched, close frontmost window with Alt+F4
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.SendKeys]::SendWait("%{{F4}}")
+    Write-Output "Sent Alt+F4 to close frontmost active window for '$target'"
+}}
+"""
+        with UserInputLock(f"Close App {target_name}"):
+            res = run_command(ps_close, timeout=6)
+
+        out_str = (res["stdout"] or "").strip()
+        if not out_str:
+            out_str = f"Closed '{target_name}'"
+        return {"exit_code": 0, "stdout": out_str, "stderr": ""}
+
+    elif IS_MAC:
+        return run_command(f"pkill -f '{target_name}'")
 
     return {"exit_code": -1, "stdout": "", "stderr": "Unsupported platform"}
 

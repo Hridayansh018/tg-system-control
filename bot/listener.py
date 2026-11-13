@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT))
 import config
 from bot import telegram_client
 from core.hermes_agent import HermesAgent
+from core import system_lifecycle
 
 OFFSET_FILE = config.TEMP_DIR / ".last_update_id"
 
@@ -37,10 +38,15 @@ def run_bot_loop():
     print(f"🧠 Active LLM Provider: {config.LLM_PROVIDER.upper()}")
     print("=" * 60)
 
+    # 1. Warm up each and every required package, driver, and app catalog
+    print("⚙️ Warming up required packages, display context, and app catalog...")
+    warmup_summary = system_lifecycle.warmup_all_subsystems()
+    print(f"✅ All Subsystems Primed in {warmup_summary.get('total_warmup_ms')}ms: {warmup_summary}")
+
     agent = HermesAgent()
     last_offset = load_last_offset()
 
-    # If first time, jump to latest
+    # 2. Pre-sync offset
     if last_offset == 0:
         try:
             init_res = requests.get(telegram_client.get_api_url("getUpdates?offset=-1"), timeout=10).json()
@@ -49,6 +55,9 @@ def run_bot_loop():
                 save_last_offset(last_offset)
         except Exception as e:
             print(f"[Listener] Init warning: {e}")
+
+    # 3. Everything is verified, primed, and running: Ping Telegram ONLINE!
+    system_lifecycle.notify_online(warmup_summary)
 
     print("🟢 Polling Telegram for messages (Press Ctrl+C to stop)...")
 

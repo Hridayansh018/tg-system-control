@@ -115,8 +115,8 @@ class HermesAgent:
             return {"text": "🔒 *Workstation Locked successfully!*", "photo": None}
 
         # 5. Direct Shell Execution (/exec or /run)
-        if user_text.startswith(("/exec ", "/run ", "run: ", "cmd: ")):
-            cmd = re.sub(r"^(/exec |/run |run: |cmd: )", "", user_text).strip()
+        if any(user_lower.startswith(p) for p in ["/exec ", "/run ", "run: ", "cmd: "]):
+            cmd = re.sub(r"^(/exec |/run |run: |cmd: )", "", user_text, flags=re.IGNORECASE).strip()
             res = os_bridge.run_command(cmd)
             out_str = (res["stdout"] or res["stderr"] or "Command executed with no output.")[:3500]
             status_icon = "✅" if res["exit_code"] == 0 else "⚠️"
@@ -131,9 +131,11 @@ class HermesAgent:
                 "photo": None
             }
 
-        # 6. Launch App (/open or /launch)
-        if user_text.startswith(("/open ", "/launch ", "open ", "launch ")):
-            app = re.sub(r"^(/open |/launch |open |launch )", "", user_text).strip()
+        # 6. Launch App (/open or open or kholo or start)
+        if any(user_lower.startswith(p) for p in ["/open ", "/launch ", "open ", "launch ", "start "]) or any(k in user_lower for k in [" open karo", " kholo", " chalao"]):
+            # Extract app name
+            app = re.sub(r"^(/open\s+|/launch\s+|open\s+|launch\s+|start\s+)", "", user_text, flags=re.IGNORECASE).strip()
+            app = re.sub(r"\s+(open karo|kholo|chalao)$", "", app, flags=re.IGNORECASE).strip()
             res = os_bridge.launch_app(app)
             memory_logger.log_entry(
                 "APP_LAUNCH",
@@ -146,6 +148,19 @@ class HermesAgent:
             else:
                 return {"text": f"⚠️ Could not launch *{app}*: {res['stderr']}", "photo": None}
 
+        # 6b. Close App / Window / Tab (/close or close or band karo or kill)
+        if any(user_lower.startswith(p) for p in ["/close ", "/kill ", "close ", "kill "]) or any(k in user_lower for k in [" band karo", " hatao", " close karo"]):
+            target = re.sub(r"^(/close\s+|/kill\s+|close\s+|kill\s+)", "", user_text, flags=re.IGNORECASE).strip()
+            target = re.sub(r"\s+(band karo|hatao|close karo)$", "", target, flags=re.IGNORECASE).strip()
+            res = os_bridge.close_app(target)
+            memory_logger.log_entry(
+                "APP_CLOSE",
+                f"Closed: {target}",
+                details={"target": target, "result": res},
+                thinking=f"Closing window/tab/application '{target}' on workstation."
+            )
+            return {"text": f"🛑 {res['stdout'] or 'Closed.'}", "photo": None}
+
         # 7. GUI: Mouse Click (/click X Y or click X Y)
         if re.match(r"^(/click|click)\s+\d+\s+\d+", user_lower):
             m = re.findall(r"\d+", user_text)
@@ -157,24 +172,24 @@ class HermesAgent:
                 return {"text": f"🖱️ Clicked at *({x}, {y})* (User input safely locked & restored)", "photo": None}
 
         # 8. GUI: Type Text (/type text or type: text)
-        if user_text.startswith(("/type ", "type: ", "write: ")):
-            txt = re.sub(r"^(/type |type: |write: )", "", user_text)
+        if any(user_lower.startswith(p) for p in ["/type ", "type: ", "write: ", "type "]):
+            txt = re.sub(r"^(/type\s+|type:\s*|write:\s*|type\s+)", "", user_text, flags=re.IGNORECASE)
             with os_bridge.UserInputLock("Keyboard Type"):
                 ok = os_bridge.type_text(txt)
             memory_logger.log_entry("GUI_KEYBOARD_TYPE", f"Typed text ({len(txt)} chars)", details={"preview": txt[:100], "success": ok})
             return {"text": f"⌨️ Typed: `{txt[:100]}` (User input safely locked & restored)", "photo": None}
 
         # 9. GUI: Press Key (/key enter or key: esc)
-        if user_text.startswith(("/key ", "key: ")):
-            k = re.sub(r"^(/key |key: )", "", user_text).strip()
+        if any(user_lower.startswith(p) for p in ["/key ", "key: ", "press "]):
+            k = re.sub(r"^(/key\s+|key:\s*|press\s+)", "", user_text, flags=re.IGNORECASE).strip()
             with os_bridge.UserInputLock(f"Key Press {k}"):
                 ok = os_bridge.press_key(k)
             memory_logger.log_entry("GUI_KEY_PRESS", f"Pressed key: {k}", details={"key": k, "success": ok})
             return {"text": f"🔘 Pressed key *{k.upper()}*", "photo": None}
 
         # 10. GUI: Hotkey (/hotkey ctrl+v or hotkey: alt+tab)
-        if user_text.startswith(("/hotkey ", "hotkey: ")):
-            hk = re.sub(r"^(/hotkey |hotkey: )", "", user_text).strip()
+        if any(user_lower.startswith(p) for p in ["/hotkey ", "hotkey: "]):
+            hk = re.sub(r"^(/hotkey\s+|hotkey:\s*)", "", user_text, flags=re.IGNORECASE).strip()
             with os_bridge.UserInputLock(f"Hotkey {hk}"):
                 ok = os_bridge.press_hotkey(hk)
             memory_logger.log_entry("GUI_HOTKEY", f"Pressed hotkey: {hk}", details={"hotkey": hk, "success": ok})

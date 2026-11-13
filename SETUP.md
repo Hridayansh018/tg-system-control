@@ -8,14 +8,48 @@ This document provides step-by-step instructions for humans and AI agents (Antig
 
 If you are an AI agent asked to set up this project:
 ```text
-Please read the SETUP.md file, set up this project on my computer, and configure the AI engine to be powered by <"specify model: e.g., gemini / claude / openrouter / offline">.
+Please read the SETUP.md file, set up this project on my computer with Bot Token: <YOUR_BOT_TOKEN> and Chat ID: <YOUR_CHAT_ID>, and configure the AI engine to be powered by <"specify model: e.g., gemini / claude / openrouter / offline">.
 ```
+1. Parse `Bot Token` and `Chat ID` from the prompt and inject them into `.env`.
 2. Verify Python version is `>= 3.10`.
 3. Create a virtual environment (`python -m venv .venv`).
 4. Install minimal dependencies (`pip install requests Pillow`).
 5. Ensure `.env` is created from `.env.example` with valid credentials.
 6. Run `python setup_check.py` to verify all components pass.
 7. Follow the platform-specific autostart or launcher steps.
+
+---
+
+## 📱 How to Generate Your Telegram Bot & Find Your Chat ID
+
+### Step 1: Create Your Bot via @BotFather
+1. In Telegram, search for **[@BotFather](https://t.me/BotFather)**.
+2. Send `/newbot`.
+3. Give it a friendly display name (e.g. `My Desktop Controller`).
+4. Give it a unique username ending with `bot` (e.g. `my_studio_pc_bot`).
+5. Copy the HTTP API token provided by BotFather (format: `1234567890:ABCdef...`).
+
+### Step 2: Get Your Personal Chat ID
+1. In Telegram, search for **[@userinfobot](https://t.me/userinfobot)**.
+2. Send `/start`.
+3. Note your numerical **`Id`** (e.g. `7166744280`).
+4. Paste both into `.env` (or pass them in the setup prompt above).
+
+---
+
+## ⚡ Zero-Latency Pre-Flight Warm-Up Architecture
+
+When `start_agent.bat` or Windows boots up:
+1. **Subsystem Warm-Up (`core/system_lifecycle.py`):**
+   - Pre-imports Python libraries (`requests`, `Pillow`, `ctypes`).
+   - Indexes all 140+ installed applications into `apps_cache.json`.
+   - Primes the GDI/display screenshot context and DPI awareness.
+   - Tests and arms the Win32 `UserInputLock` bridge.
+   - Measures Telegram API network latency.
+2. **Delayed Telegram Ping:**
+   - The bot starts listening first.
+   - **ONLY WHEN** all subsystems are 100% verified and the polling loop is active does the bot dispatch `🟢 SYSTEM ONLINE ⚡` to Telegram.
+   - This eliminates startup command latency.
 
 ---
 
