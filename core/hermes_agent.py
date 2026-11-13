@@ -1,378 +1,311 @@
-"""Hermes Agent: Autonomous desktop agent loop.
-Combines LLM reasoning with OS execution tools to control your PC via Telegram.
+"""Hermes Agent: turns Telegram messages into desktop actions.
+
+Flow for every message:
+  1. Local parser  - slash commands and exact short phrases ("open edge", "screenshot",
+                     "spotify band karo") run instantly, no internet needed.
+  2. Translator    - anything else goes to the LLM, which may only answer with commands
+                     from a fixed menu (core/translator.py). Those commands run through the
+                     same local handlers below.
+  3. Agent mode    - open-ended multi-step tasks are handed to the computer-use agent
+                     when it is available.
 """
-import json
 import re
 import time
-from pathlib import Path
+from typing import Callable, List, Optional, Tuple
 
-from . import os_bridge
+import config
 from . import llm_router
 from . import memory_logger
-import config
+from . import os_bridge
+from . import translator
 
-SYSTEM_PROMPT = """You are Hermes Agent, a powerful desktop AI assistant running locally on the user's computer.
-You have direct execution capability to control the PC using specific tool actions.
+Command = Tuple[str, str]
 
-When the user asks you to do something, you can choose to execute tools by replying in JSON format:
-```json
-{
-  "actions": [
-    {
-      "action": "<tool_name>",
-      "parameters": { ... }
-    }
-  ],
-  "message": "Optional friendly reply to user"
+# Words that mean the message is more than "open/close <app>" -> let the translator handle it.
+CONNECTOR_WORDS = {
+    "and", "aur", "then", "phir", "fir", "me", "mein", "main", "pe", "par", "wahan", "waha", "wha",
+    "karke", "ke", "ki", "ko", "se", "after", "with", "also", "bhi", "uske", "baad",
 }
-```
-Or for a single action:
-```json
-{
-  "action": "<tool_name>",
-  "parameters": { ... }
-}
-```
 
-Available Tools:
-1. `take_screenshot`: Captures the current desktop screen. No parameters required.
-2. `get_system_stats`: Returns CPU, RAM, Disk, and OS metrics. No parameters required.
-3. `execute_command`: Runs any command in PowerShell (Windows) or Bash (Mac). Parameters: `{"command": "string"}`.
-4. `launch_app`: Opens an application or website. Parameters: `{"app_name": "string"}` (e.g. "edge", "chrome", "notepad", "calc", "chatgpt", "youtube studio").
-5. `focus_window`: Brings an existing open window to the front. Parameters: `{"window_title": "string"}` (e.g. "chatgpt", "edge", "chrome").
-6. `close_app`: Closes an application or website tab. Parameters: `{"target": "string"}` (e.g. "edge", "notepad", "youtube studio").
-7. `list_processes`: Lists top running processes by CPU. Parameters: `{"limit": 10}`.
-8. `lock_pc`: Locks the workstation screen. No parameters required.
-9. `mouse_click`: Clicks the mouse at screen coordinates (x, y) or current position. Parameters: `{"x": int, "y": int, "button": "left"|"right", "double": bool}`.
-10. `mouse_move`: Moves mouse cursor to (x, y). Parameters: `{"x": int, "y": int}`.
-11. `type_text`: Types plain text into the active focused window. Parameters: `{"text": "string"}`.
-12. `press_key`: Presses a special key. Parameters: `{"key": "enter"|"tab"|"esc"|"space"|"backspace"}`.
-13. `press_hotkey`: Presses a hotkey combination. Parameters: `{"hotkey": "ctrl+c"|"ctrl+v"|"ctrl+w"|"alt+tab"|"win+d"}`.
-14. `automate_chatgpt`: Direct tool to open ChatGPT in Microsoft Edge, start a new chat, enter prompt, submit it, and capture screenshot. Parameters: `{"prompt": "string", "new_chat": bool}`.
+HELP_TEXT = (
+    "🤖 *TG-System-Control — Commands*\n\n"
+    "*Quick commands (instant, work offline):*\n"
+    "• `status` / `/status` — CPU, RAM, disk\n"
+    "• `screenshot` / `/shot` — desktop screenshot\n"
+    "• `open <app>` / `<app> kholo` — open an app or website\n"
+    "• `close <app>` / `<app> band karo` — close an app\n"
+    "• `close tab` · `close window` / `hatao`\n"
+    "• `processes` / `/proc` — top processes\n"
+    "• `lock pc` / `/lock` — lock the screen\n"
+    "• `/exec <command>` — run a PowerShell/Bash command\n"
+    "• `/type <text>` · `/prompt <text>` (type + Enter)\n"
+    "• `/key enter` · `/hotkey ctrl+w` · `/click 500 300`\n"
+    "• `/focus <window>` · `/chatgpt <prompt>`\n"
+    "• `/sendfile <name>` · `/latest` (newest download)\n\n"
+    "*Anything else* (Hinglish or English) is translated into these commands by the AI, "
+    "e.g. _\"spotify kholo aur edge band karo\"_."
+)
 
-CRITICAL RULES FOR MULTI-STEP AUTOMATION:
-- For requests involving ChatGPT (e.g. "open chatgpt and generate thumbnails", "generate 3 thumbnails for luffy in chatgpt"):
-  You can either return `{"action": "automate_chatgpt", "parameters": {"prompt": "Detailed thumbnail prompt...", "new_chat": true}}` OR use the sequence: `launch_app` -> `type_text` -> `press_key: enter` -> `take_screenshot`.
-- When the user asks to DO something in an app: NEVER just launch the app and stop! Always include typing, submitting, and screenshotting in one response.
+_END_PUNCT = re.compile(r"[\s.!?]+$")
 
-If the user asks a normal question that requires no tool execution, just reply with helpful text normally.
-Be concise, helpful, and speak in Hinglish/English as the user prefers.
-"""
+
+def _norm(text: str) -> str:
+    return _END_PUNCT.sub("", re.sub(r"\s+", " ", text.strip().lower()))
+
+
+def _simple_target(arg: str) -> bool:
+    words = arg.split()
+    return 0 < len(words) <= 5 and not any(w in CONNECTOR_WORDS for w in words)
+
+
+# (regex on the ORIGINAL text, command) - arguments are kept exactly as typed
+RAW_PREFIX_RULES = [
+    (r"^(?:/exec|/run|/cmd|run:|cmd:)\s+(.+)$", "exec"),
+    (r"^(?:/prompt|prompt:|type and enter:|enter prompt:)\s*(.+)$", "type_enter"),
+    (r"^(?:/type|type:|write:|type\s)\s*(.+)$", "type"),
+    (r"^(?:/key|key:)\s*(.+)$", "press"),
+    (r"^(?:/hotkey|hotkey:)\s*(.+)$", "hotkey"),
+    (r"^(?:/open|/launch)\s+(.+)$", "open"),
+    (r"^(?:/close|/kill)\s+(.+)$", "close"),
+    (r"^/focus\s+(.+)$", "focus"),
+    (r"^/chatgpt\s+(.+)$", "chatgpt"),
+    (r"^(?:/sendfile|/file|send file:?)\s+(.+)$", "send_file"),
+]
+
+# (fullmatch regex on the normalised text, command, arg-or-None-for-group-1)
+PHRASE_RULES = [
+    (r"/help|/start|help|commands|menu", "help", ""),
+    (r"/latest|send latest download|latest download( bhejo)?|last download bhejo", "send_latest_download", ""),
+    (r"/shot|/screenshot|(?:(?:take|send|le|lo) )?(?:a )?(?:screenshot|screen shot|ss|screen capture)"
+     r"(?: (?:bhejo|bhej do|lo|le lo|do|dikhao|please|pls|now))*|desktop dikhao|screen dikhao", "screenshot", ""),
+    (r"/status|(?:pc |system |computer )?(?:status|stats|specs|health)(?: (?:batao|dikhao|check|please|pls|kya hai))*"
+     r"|ram|cpu|disk|storage", "status", ""),
+    (r"/proc|/processes|(?:top |running )?(?:process|processes|tasks)(?: (?:dikhao|list|batao))?|task list", "processes", ""),
+    (r"/lock|lock|lock pc|lock screen|lock (?:the )?computer|(?:pc|screen) lock(?: karo| kar do)?", "lock", ""),
+    (r"/close|close|close window|close this|hatao|hata do|band karo|band kar do|close karo|close kar do", "close", ""),
+    (r"close tab|tab (?:band karo|band kar do|close karo|hatao)", "close", "tab"),
+    (r"enter|hit enter|press enter|enter dabao", "press", "enter"),
+    (r"(?:press|hit) (\S+)", "press", None),
+]
+
+# (fullmatch regex, command) whose group 1 is an app name that must pass _simple_target
+TARGET_RULES = [
+    (r"(?:open|launch|start|kholo|khol do) (.+)", "open"),
+    (r"(.+?) (?:open karo|open kar do|kholo|khol do|chalao|chala do|start karo|launch karo|open)", "open"),
+    (r"(?:close|kill|quit|exit) (.+)", "close"),
+    (r"(.+?) (?:band karo|band kar do|bandh karo|close karo|close kar do|hatao|hata do|quit karo|close)", "close"),
+]
+
+
+def parse_local(user_text: str) -> Optional[List[Command]]:
+    """Returns commands for messages that can be handled without the LLM, else None."""
+    text = user_text.strip()
+    if not text:
+        return None
+
+    for pattern, cmd in RAW_PREFIX_RULES:
+        m = re.match(pattern, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return [(cmd, m.group(1).strip())]
+
+    m = re.fullmatch(r"/?click\s+(\d+)\s*,?\s*(\d+)", text, re.IGNORECASE)
+    if m:
+        return [("click", f"{m.group(1)} {m.group(2)}")]
+
+    norm = _norm(text)
+    for pattern, cmd, arg in PHRASE_RULES:
+        m = re.fullmatch(pattern, norm)
+        if m:
+            return [(cmd, m.group(1) if arg is None else arg)]
+
+    for pattern, cmd in TARGET_RULES:
+        m = re.fullmatch(pattern, norm)
+        if m and _simple_target(m.group(1)):
+            return [(cmd, m.group(1).strip())]
+
+    return None
+
+
+def _result(text: str = "", files: list = None) -> dict:
+    return {"text": text, "files": files or []}
 
 
 class HermesAgent:
-    def __init__(self):
-        self.screenshot_counter = 0
+    def __init__(self, agent_hook: Optional[Callable[[str], dict]] = None):
+        # agent_hook(task) -> result dict; set by the listener when agent mode is available.
+        self.agent_hook = agent_hook
 
+    # ------------------------------------------------------------------
     def process_message(self, user_text: str) -> dict:
-        """Processes an incoming user message and executes any required desktop actions.
-        Returns a dict: {"text": str, "photo": str or None}
-        """
-        user_lower = user_text.strip().lower()
+        """Returns {"text": str, "files": [{"kind": "photo"|"document", "path": str, "caption": str}]}"""
+        local = parse_local(user_text)
+        if local is not None:
+            return self.run_commands(local, user_text)
 
-        # -------------------------------------------------------------
-        # Fast Path / Direct Commands & Offline Fallback Handling
-        # -------------------------------------------------------------
-        # 1. Screenshot
-        if any(k in user_lower for k in ["screenshot", "screen shot", "/shot", "ss bhejo", "screen capture", "desktop dikhao"]):
-            out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time())}.jpg"
-            ok = os_bridge.take_screenshot(out_file)
-            memory_logger.log_entry(
-                "DESKTOP_ACTION",
-                "Captured Desktop Screenshot",
-                details={"file": out_file.name, "success": ok},
-                thinking=f"User asked '{user_text}'. Triggering screen capture and sending photo."
+        tr = translator.translate(user_text, agent_available=self.agent_hook is not None)
+        kind = tr.get("kind")
+
+        if kind == "offline":
+            return _result(
+                "🤖 *Offline mode* — no AI key configured, so only exact commands work.\n\n" + HELP_TEXT
+                + "\n\n💡 Add `GEMINI_API_KEY` to `.env` to use Hinglish / free text."
             )
-            if ok and out_file.exists():
-                return {
-                    "text": "📸 *Desktop Screenshot Captured!*",
-                    "photo": str(out_file)
-                }
-            else:
-                return {"text": "⚠️ Screenshot capture failed (Screen might be locked or running without desktop session).", "photo": None}
-
-        # 2. System Status / Metrics
-        if any(k in user_lower for k in ["status", "/status", "pc status", "ram", "cpu", "disk", "specs", "system stats"]):
-            stats = os_bridge.get_system_stats()
-            memory_logger.log_entry(
-                "HARDWARE_METRICS",
-                "Collected Hardware Specs & Resource Utilization",
-                details=stats,
-                thinking=f"User asked for system status. Polled CPU ({stats.get('cpu_cores')} cores), RAM ({stats.get('ram_used_pct')}%), and storage."
-            )
-            reply = (
-                f"💻 *SYSTEM HARDWARE & RESOURCE STATUS*\n\n"
-                f"🖥️ *OS:* `{stats.get('os')}` ({stats.get('architecture')})\n"
-                f"🧠 *CPU Cores:* `{stats.get('cpu_cores')}`\n"
-            )
-            if "ram_total_gb" in stats:
-                reply += f"⚡ *RAM:* `{stats.get('ram_used_gb', 0)} GB` / `{stats.get('ram_total_gb')} GB` ({stats.get('ram_used_pct')} % used)\n"
-            if "disk_total_gb" in stats:
-                reply += f"💾 *Disk (C:):* `{stats.get('disk_free_gb')} GB Free` / `{stats.get('disk_total_gb')} GB` ({stats.get('disk_used_pct')} % used)\n"
-
-            reply += f"\n🕒 *Server Time:* `{time.strftime('%Y-%m-%d %H:%M:%S')}`"
-            return {"text": reply, "photo": None}
-
-        # 3. Top Processes
-        if any(k in user_lower for k in ["process", "processes", "taskmgr", "task manager", "/proc"]):
-            proc_out = os_bridge.list_top_processes(limit=8)
-            memory_logger.log_entry(
-                "PROCESS_INSPECTION",
-                "Queried Top Running Processes",
-                details={"limit": 8},
-                thinking="Inspected CPU/Memory consuming processes."
-            )
-            return {"text": f"📋 *TOP RUNNING PROCESSES:*\n```text\n{proc_out[:3500]}\n```", "photo": None}
-
-        # 4. Lock PC
-        if any(k in user_lower for k in ["lock pc", "lock screen", "/lock"]):
-            os_bridge.lock_workstation()
-            memory_logger.log_entry(
-                "SECURITY_ACTION",
-                "Locked Workstation",
-                thinking="User instructed remote screen lock via Telegram."
-            )
-            return {"text": "🔒 *Workstation Locked successfully!*", "photo": None}
-
-        # 5. Direct Shell Execution (/exec or /run)
-        if any(user_lower.startswith(p) for p in ["/exec ", "/run ", "run: ", "cmd: "]):
-            cmd = re.sub(r"^(/exec |/run |run: |cmd: )", "", user_text, flags=re.IGNORECASE).strip()
-            res = os_bridge.run_command(cmd)
-            out_str = (res["stdout"] or res["stderr"] or "Command executed with no output.")[:3500]
-            status_icon = "✅" if res["exit_code"] == 0 else "⚠️"
-            memory_logger.log_entry(
-                "SHELL_COMMAND",
-                f"Executed: {cmd}",
-                details={"exit_code": res["exit_code"], "output_preview": out_str[:250]},
-                thinking=f"Executing remote shell command from Telegram: {cmd}"
-            )
-            return {
-                "text": f"{status_icon} *Command Output (Exit code {res['exit_code']}):*\n```text\n{out_str}\n```",
-                "photo": None
-            }
-
-        # 6. Launch App (/open or open or kholo or start)
-        # CRITICAL: Only trigger simple app launch if it is NOT a complex instruction with actions!
-        action_indicators = [
-            "generate", "thumbnail", "prompt", "video", "write", "search", "type", "click",
-            "create", "banao", "dalo", "likho", "chat", "new chat", "then", "and", "karke",
-            "send", "dikhao", "review", "wha", "wahan", "pe", "par", "me", "mein", "aur",
-            "image", "photo", "pic", "make", "find", "luffy", "marinford"
-        ]
-        is_complex = any(w in user_lower for w in action_indicators)
-
-        if not is_complex and (
-            any(user_lower.startswith(p) for p in ["/open ", "/launch ", "open ", "launch ", "start "])
-            or any(user_lower.endswith(k) for k in [" open karo", " kholo", " chalao"])
-        ):
-            # Extract app name
-            app = re.sub(r"^(/open\s+|/launch\s+|open\s+|launch\s+|start\s+)", "", user_text, flags=re.IGNORECASE).strip()
-            app = re.sub(r"\s+(open karo|kholo|chalao)$", "", app, flags=re.IGNORECASE).strip()
-            if len(app.split()) <= 3:
-                res = os_bridge.launch_app(app)
-                memory_logger.log_entry(
-                    "APP_LAUNCH",
-                    f"Launched application: {app}",
-                    details={"app": app, "exit_code": res["exit_code"]},
-                    thinking=f"Launching application '{app}' on workstation."
+        if kind == "error":
+            memory_logger.log_entry("TRANSLATOR_ERROR", "Translator failed", details={"error": tr["error"][:300]},
+                                    thinking=f"Could not translate: {user_text[:200]}")
+            return _result(f"⚠️ *AI translator error:* {tr['error']}\n\nTry an exact command — send `/help`.")
+        if kind == "chat":
+            memory_logger.log_entry("CHAT", "Replied without executing", details={"message": user_text[:200]},
+                                    thinking="Message was conversation/feedback, not an instruction.")
+            return _result(tr["reply"])
+        if kind == "agent_task":
+            if self.agent_hook is None:
+                return _result(
+                    f"🧠 Understood as a multi-step task: _{tr['task']}_\n\n"
+                    "⚠️ Agent mode isn't available, so I can't do multi-step screen tasks. "
+                    "Send the steps as separate commands (see /help)."
                 )
-                if res["exit_code"] == 0:
-                    return {"text": f"🚀 Launched *{app}* on PC!", "photo": None}
-                else:
-                    return {"text": f"⚠️ Could not launch *{app}*: {res['stderr']}", "photo": None}
+            return self.agent_hook(tr["task"])
 
-        # 6b. Close App / Window / Tab (/close or close or band karo or kill)
-        if any(user_lower.startswith(p) for p in ["/close ", "/kill ", "close ", "kill "]) or any(k in user_lower for k in [" band karo", " hatao", " close karo"]):
-            target = re.sub(r"^(/close\s+|/kill\s+|close\s+|kill\s+)", "", user_text, flags=re.IGNORECASE).strip()
-            target = re.sub(r"\s+(band karo|hatao|close karo)$", "", target, flags=re.IGNORECASE).strip()
-            res = os_bridge.close_app(target)
-            memory_logger.log_entry(
-                "APP_CLOSE",
-                f"Closed: {target}",
-                details={"target": target, "result": res},
-                thinking=f"Closing window/tab/application '{target}' on workstation."
-            )
-            return {"text": f"🛑 {res['stdout'] or 'Closed.'}", "photo": None}
+        commands = tr["commands"]
+        understood = " → ".join(f"{c} {a}".strip() for c, a in commands)
+        res = self.run_commands(commands, user_text)
+        res["text"] = f"🧠 *Understood as:* `{understood}`\n\n" + res["text"]
+        return res
 
-        # 7. GUI: Mouse Click (/click X Y or click X Y)
-        if re.match(r"^(/click|click)\s+\d+\s+\d+", user_lower):
-            m = re.findall(r"\d+", user_text)
-            if len(m) >= 2:
-                x, y = int(m[0]), int(m[1])
-                with os_bridge.UserInputLock("Mouse Click"):
-                    ok = os_bridge.mouse_click(x, y)
-                memory_logger.log_entry("GUI_MOUSE_CLICK", f"Clicked at ({x}, {y})", details={"x": x, "y": y, "success": ok})
-                return {"text": f"🖱️ Clicked at *({x}, {y})* (User input safely locked & restored)", "photo": None}
-
-        # 8. GUI: Type Text (/type text or type: text)
-        if any(user_lower.startswith(p) for p in ["/type ", "type: ", "write: ", "type "]):
-            txt = re.sub(r"^(/type\s+|type:\s*|write:\s*|type\s+)", "", user_text, flags=re.IGNORECASE)
-            with os_bridge.UserInputLock("Keyboard Type"):
-                ok = os_bridge.type_text(txt)
-            memory_logger.log_entry("GUI_KEYBOARD_TYPE", f"Typed text ({len(txt)} chars)", details={"preview": txt[:100], "success": ok})
-            return {"text": f"⌨️ Typed: `{txt[:100]}` (User input safely locked & restored)", "photo": None}
-
-        # 8b. GUI: Type & Press Enter (Compound action for forms/search/chatgpt prompt box)
-        if any(user_lower.startswith(p) for p in ["/prompt ", "prompt: ", "type and enter: ", "enter prompt: "]):
-            txt = re.sub(r"^(/prompt\s+|prompt:\s*|type and enter:\s*|enter prompt:\s*)", "", user_text, flags=re.IGNORECASE).strip()
-            with os_bridge.UserInputLock("Type & Enter Prompt"):
-                ok = os_bridge.type_text(txt)
-                time.sleep(0.3)
-                os_bridge.press_key("enter")
-            memory_logger.log_entry("GUI_TYPE_AND_ENTER", f"Typed and submitted prompt ({len(txt)} chars)", details={"preview": txt[:100], "success": ok})
-            return {"text": f"⌨️ *Prompt Typed & Submitted (Enter pressed):*\n`{txt[:250]}`\n\n📸 *Tip:* Send `/shot` after a few seconds to see the result!", "photo": None}
-
-        # 9. GUI: Press Key (/key enter or key: esc or press enter)
-        if user_lower in ["enter", "hit enter", "press enter"] or any(user_lower.startswith(p) for p in ["/key ", "key: ", "press ", "hit "]):
-            k = re.sub(r"^(/key\s+|key:\s*|press\s+|hit\s+)", "", user_text, flags=re.IGNORECASE).strip()
-            if not k:
-                k = "enter"
-            with os_bridge.UserInputLock(f"Key Press {k}"):
-                ok = os_bridge.press_key(k)
-            memory_logger.log_entry("GUI_KEY_PRESS", f"Pressed key: {k}", details={"key": k, "success": ok})
-            return {"text": f"🔘 Pressed key *{k.upper()}*", "photo": None}
-
-        # 10. GUI: Hotkey (/hotkey ctrl+v or hotkey: alt+tab)
-        if any(user_lower.startswith(p) for p in ["/hotkey ", "hotkey: "]):
-            hk = re.sub(r"^(/hotkey\s+|hotkey:\s*)", "", user_text, flags=re.IGNORECASE).strip()
-            with os_bridge.UserInputLock(f"Hotkey {hk}"):
-                ok = os_bridge.press_hotkey(hk)
-            memory_logger.log_entry("GUI_HOTKEY", f"Pressed hotkey: {hk}", details={"hotkey": hk, "success": ok})
-            return {"text": f"⚡ Pressed hotkey *{hk.upper()}*", "photo": None}
-
-        # -------------------------------------------------------------
-        # LLM Router Path (Gemini / Hermes 3 / Groq)
-        # -------------------------------------------------------------
-        llm_res = llm_router.route_prompt(user_text, SYSTEM_PROMPT)
-
-        if "error" in llm_res:
-            return {
-                "text": f"⚠️ *LLM Error:* {llm_res['error']}\n\n💡 *Offline Commands Available:*\n• `/status` - Check CPU/RAM/Disk\n• `/shot` - Capture desktop screenshot\n• `/open <app>` - Launch browser/app\n• `/exec <cmd>` - Run PowerShell command\n• `/proc` - Top processes\n• `/lock` - Lock PC",
-                "photo": None
-            }
-
-        if llm_res.get("offline"):
-            # Offline help
-            return {
-                "text": (
-                    f"🤖 *Hermes PC Controller (Offline Mode)*\n\n"
-                    f"Main abhi bina cloud API key ke direct system mode mein chal raha hoon.\n\n"
-                    f"📌 *Commands Available:*\n"
-                    f"• `status` ya `/status` - PC ki RAM, CPU aur Disk dekhein\n"
-                    f"• `screenshot` ya `/shot` - Live desktop screenshot lein\n"
-                    f"• `open edge` ya `/open chrome` - Koi bhi application kholein\n"
-                    f"• `/exec <command>` - Koi bhi PowerShell command run karein\n"
-                    f"• `processes` ya `/proc` - Running tasks dekhein\n"
-                    f"• `lock pc` ya `/lock` - PC screen lock karein\n\n"
-                    f"💡 *Tip:* `.env` mein `GEMINI_API_KEY` daal doge toh main natural language mein baatein karke decisions bhi le sakunga!"
-                ),
-                "photo": None
-            }
-
-        reply_raw = llm_res.get("reply", "")
-
-        # Check if LLM emitted JSON tool action(s)
-        json_match = re.search(r"```json\s*(\{.*?\}|\[.*?\])\s*```", reply_raw, re.DOTALL)
-        if json_match:
+    # ------------------------------------------------------------------
+    def run_commands(self, commands: List[Command], original: str) -> dict:
+        texts, files = [], []
+        for i, (cmd, arg) in enumerate(commands):
+            if i > 0:
+                time.sleep(1.5 if commands[i - 1][0] in ("open", "focus") else 0.3)
             try:
-                data = json.loads(json_match.group(1))
-                if isinstance(data, list):
-                    actions_list = data
-                    reply_msg = ""
-                elif isinstance(data, dict):
-                    actions_list = data.get("actions") or [data]
-                    reply_msg = data.get("message", "")
-                else:
-                    actions_list = []
-                    reply_msg = ""
-
-                photo_to_send = None
-                executed_logs = []
-
-                for item in actions_list:
-                    act = item.get("action")
-                    params = item.get("parameters", {})
-
-                    if act == "automate_chatgpt":
-                        prm = params.get("prompt", "")
-                        nc = params.get("new_chat", True)
-                        res = os_bridge.automate_chatgpt(prm, new_chat=nc)
-                        if res.get("screenshot"):
-                            photo_to_send = res["screenshot"]
-                        executed_logs.append(f"Automated ChatGPT with prompt: `{prm[:50]}...`")
-
-                    elif act == "launch_app":
-                        app = params.get("app_name", "")
-                        os_bridge.launch_app(app)
-                        executed_logs.append(f"Launched {app}")
-                        # If more actions follow (like typing), allow page/browser time to load and gain focus
-                        time.sleep(3.0 if any(b in app.lower() for b in ["edge", "chrome", "chatgpt", "browser", "http"]) else 1.5)
-
-                    elif act == "focus_window":
-                        win_title = params.get("window_title", "")
-                        ok = os_bridge.focus_window(win_title)
-                        executed_logs.append(f"Focused window '{win_title}'")
-                        time.sleep(0.5)
-
-                    elif act == "close_app":
-                        target = params.get("target", "")
-                        os_bridge.close_app(target)
-                        executed_logs.append(f"Closed {target}")
-
-                    elif act == "type_text":
-                        txt = params.get("text", "")
-                        with os_bridge.UserInputLock("LLM Keyboard Type"):
-                            os_bridge.type_text(txt)
-                        executed_logs.append(f"Typed: `{txt[:40]}`")
-                        time.sleep(0.3)
-
-                    elif act == "press_key":
-                        k = params.get("key", "enter")
-                        with os_bridge.UserInputLock(f"LLM Key Press {k}"):
-                            os_bridge.press_key(k)
-                        executed_logs.append(f"Pressed {k.upper()}")
-                        time.sleep(0.3)
-
-                    elif act == "press_hotkey":
-                        hk = params.get("hotkey", "")
-                        with os_bridge.UserInputLock(f"LLM Hotkey {hk}"):
-                            os_bridge.press_hotkey(hk)
-                        executed_logs.append(f"Pressed hotkey {hk.upper()}")
-
-                    elif act == "mouse_click":
-                        x = params.get("x")
-                        y = params.get("y")
-                        btn = params.get("button", "left")
-                        dbl = params.get("double", False)
-                        with os_bridge.UserInputLock("LLM Mouse Click"):
-                            os_bridge.mouse_click(x, y, btn, dbl)
-                        executed_logs.append(f"Clicked ({x}, {y})")
-
-                    elif act == "take_screenshot":
-                        out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time())}.jpg"
-                        ok = os_bridge.take_screenshot(out_file)
-                        if ok and out_file.exists():
-                            photo_to_send = str(out_file)
-                        executed_logs.append("Captured screenshot")
-
-                    elif act == "get_system_stats":
-                        stats = os_bridge.get_system_stats()
-                        executed_logs.append(f"CPU: {stats.get('cpu_cores')} cores | RAM: {stats.get('ram_used_pct')}%")
-
-                    elif act == "execute_command":
-                        cmd = params.get("command", "")
-                        res = os_bridge.run_command(cmd)
-                        executed_logs.append(f"Executed: `{cmd[:40]}` (Exit {res['exit_code']})")
-
-                    elif act == "lock_pc":
-                        os_bridge.lock_workstation()
-                        executed_logs.append("Locked workstation")
-
-                summary = reply_msg or ("⚡ *Actions Completed:*\n• " + "\n• ".join(executed_logs))
-                return {"text": summary, "photo": photo_to_send}
-
+                res = self.execute(cmd, arg)
             except Exception as e:
-                print(f"[HermesAgent] Tool execution error: {e}")
+                res = _result(f"⚠️ `{cmd}` failed: {e}")
+            memory_logger.log_entry(
+                "COMMAND", f"{cmd} {arg[:120]}".strip(),
+                details={"result": res["text"][:250], "files": [f["path"] for f in res["files"]]},
+                thinking=f"From message: {original[:200]}",
+            )
+            if res["text"]:
+                texts.append(res["text"])
+            files.extend(res["files"])
+        return _result("\n".join(texts), files)
 
-        # Return standard conversational reply
-        return {"text": reply_raw, "photo": None}
+    # ------------------------------------------------------------------
+    def execute(self, cmd: str, arg: str) -> dict:
+        handler = getattr(self, f"cmd_{cmd}", None)
+        if handler is None:
+            return _result(f"⚠️ Unknown command `{cmd}`")
+        return handler(arg)
+
+    def cmd_help(self, arg):
+        return _result(HELP_TEXT)
+
+    def cmd_screenshot(self, arg):
+        out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time() * 1000)}.jpg"
+        if os_bridge.take_screenshot(out_file) and out_file.exists():
+            return _result("", [{"kind": "photo", "path": str(out_file), "caption": "📸 *Desktop Screenshot*"}])
+        return _result("⚠️ Screenshot failed (screen locked, or no desktop session).")
+
+    def cmd_status(self, arg):
+        stats = os_bridge.get_system_stats()
+        reply = (
+            f"💻 *SYSTEM STATUS*\n\n"
+            f"🖥️ *OS:* `{stats.get('os')}` ({stats.get('architecture')})\n"
+            f"🧠 *CPU Cores:* `{stats.get('cpu_cores')}`\n"
+        )
+        if "ram_total_gb" in stats:
+            reply += f"⚡ *RAM:* `{stats.get('ram_used_gb', 0)} GB` / `{stats.get('ram_total_gb')} GB` ({stats.get('ram_used_pct')} % used)\n"
+        if "disk_total_gb" in stats:
+            reply += f"💾 *Disk:* `{stats.get('disk_free_gb')} GB Free` / `{stats.get('disk_total_gb')} GB` ({stats.get('disk_used_pct')} % used)\n"
+        reply += f"\n🕒 *Time:* `{time.strftime('%Y-%m-%d %H:%M:%S')}`"
+        return _result(reply)
+
+    def cmd_processes(self, arg):
+        out = os_bridge.list_top_processes(limit=8)
+        return _result(f"📋 *TOP PROCESSES:*\n```\n{out[:3500]}\n```")
+
+    def cmd_lock(self, arg):
+        res = os_bridge.lock_workstation()
+        return _result("🔒 *Workstation locked.*" if res["exit_code"] == 0 else f"⚠️ Lock failed: {res['stderr']}")
+
+    def cmd_exec(self, arg):
+        res = os_bridge.run_command(arg)
+        out = (res["stdout"] or res["stderr"] or "Command executed with no output.")[:3500]
+        icon = "✅" if res["exit_code"] == 0 else "⚠️"
+        return _result(f"{icon} *Exit code {res['exit_code']}:*\n```\n{out}\n```")
+
+    def cmd_open(self, arg):
+        res = os_bridge.launch_app(arg)
+        if res["exit_code"] == 0:
+            return _result(f"🚀 Opened *{arg}*")
+        return _result(f"⚠️ {res['stderr'] or 'Could not open ' + arg}")
+
+    def cmd_close(self, arg):
+        res = os_bridge.close_app(arg)
+        icon = "🛑" if res["exit_code"] == 0 else "⚠️"
+        return _result(f"{icon} {res['stdout'] or res['stderr']}")
+
+    def _lock_note(self, lock) -> str:
+        return " (your mouse/keyboard were locked meanwhile)" if lock.locked else ""
+
+    def cmd_type(self, arg):
+        with os_bridge.UserInputLock("Keyboard Type") as lock:
+            ok = os_bridge.type_text(arg)
+        return _result(f"⌨️ Typed `{arg[:100]}`{self._lock_note(lock)}" if ok else "⚠️ Typing failed")
+
+    def cmd_type_enter(self, arg):
+        with os_bridge.UserInputLock("Type & Enter") as lock:
+            ok = os_bridge.type_text(arg)
+            time.sleep(0.3)
+            os_bridge.press_key("enter")
+        if not ok:
+            return _result("⚠️ Typing failed")
+        return _result(f"⌨️ Typed and submitted `{arg[:250]}`{self._lock_note(lock)}\n📸 Send `/shot` in a few seconds to see the result.")
+
+    def cmd_press(self, arg):
+        with os_bridge.UserInputLock(f"Key {arg}"):
+            ok = os_bridge.press_key(arg or "enter")
+        return _result(f"🔘 Pressed *{(arg or 'enter').upper()}*" if ok else f"⚠️ Unknown key `{arg}`")
+
+    def cmd_hotkey(self, arg):
+        with os_bridge.UserInputLock(f"Hotkey {arg}"):
+            ok = os_bridge.press_hotkey(arg)
+        return _result(f"⚡ Pressed *{arg.upper()}*" if ok else f"⚠️ Unknown hotkey `{arg}`")
+
+    def cmd_click(self, arg):
+        x, y = (int(v) for v in arg.split()[:2])
+        with os_bridge.UserInputLock("Mouse Click") as lock:
+            ok = os_bridge.mouse_click(x, y)
+        return _result(f"🖱️ Clicked at *({x}, {y})*{self._lock_note(lock)}" if ok else "⚠️ Click failed")
+
+    def cmd_focus(self, arg):
+        ok = os_bridge.focus_window(arg)
+        return _result(f"🪟 Focused *{arg}*" if ok else f"⚠️ No open window matching `{arg}`")
+
+    def cmd_chatgpt(self, arg):
+        res = os_bridge.automate_chatgpt(arg, new_chat=True)
+        files = [{"kind": "photo", "path": res["screenshot"], "caption": "🤖 ChatGPT"}] if res.get("screenshot") else []
+        note = res.get("note", "Prompt submitted. Send `/shot` later to see the answer.")
+        return _result(f"🤖 *ChatGPT:* `{arg[:120]}`\n{note}", files)
+
+    def cmd_send_latest_download(self, arg):
+        f = os_bridge.latest_download()
+        if not f:
+            return _result("⚠️ Downloads folder is empty.")
+        return _result("", [{"kind": "document", "path": str(f), "caption": f"📥 {f.name}"}])
+
+    def cmd_send_file(self, arg):
+        f = os_bridge.find_file(arg)
+        if not f:
+            return _result(f"⚠️ File `{arg}` not found (looked in screenshots, Downloads, Desktop, Documents).")
+        if f.stat().st_size > 49 * 1024 * 1024:
+            return _result(f"⚠️ `{f.name}` is larger than Telegram's 50 MB bot limit.")
+        return _result("", [{"kind": "document", "path": str(f), "caption": f"📄 {f.name}"}])
+
+
+def llm_status_line() -> str:
+    provider = llm_router.active_provider()
+    return "OFFLINE (exact commands only)" if provider == "offline" else provider.upper()

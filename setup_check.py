@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,13 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+for _stream in (sys.stdout, sys.stderr):  # emoji output must not crash on cp1252 consoles/pipes
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 ENV_FILE = ROOT / ".env"
 ENV_EXAMPLE = ROOT / ".env.example"
 
@@ -88,13 +96,23 @@ def main():
     chat_id = env_data.get("TELEGRAM_CHAT_ID", "")
     provider = env_data.get("LLM_PROVIDER", "offline")
 
-    token_ok = bool(token and token != "your_bot_token_here")
-    all_ok &= check_step("Telegram Bot Token", token_ok, f"{token[:8]}..." if token_ok else "Missing in .env")
+    placeholders = {"", "your_bot_token_here", "your_telegram_chat_id"}
+    token_ok = bool(token not in placeholders and re.fullmatch(r"\d+:[\w-]{30,}", token))
+    all_ok &= check_step("Telegram Bot Token", token_ok,
+                         f"{token[:6]}... (format OK)" if token_ok else "Missing or placeholder in .env - get one from @BotFather")
 
-    chat_ok = bool(chat_id and chat_id != "your_telegram_chat_id")
-    all_ok &= check_step("Authorized Chat ID", chat_ok, chat_id if chat_ok else "Missing in .env")
+    chat_ok = bool(chat_id not in placeholders and re.fullmatch(r"-?\d+", chat_id))
+    all_ok &= check_step("Authorized Chat ID", chat_ok,
+                         "Set (numeric)" if chat_ok else "Missing or placeholder in .env - get it from @userinfobot")
 
-    check_step("Configured LLM Brain", True, f"Provider = '{provider}'")
+    key_names = {"gemini": "GEMINI_API_KEY", "openrouter": "OPENROUTER_API_KEY", "groq": "GROQ_API_KEY"}
+    key_name = key_names.get(provider)
+    if key_name and env_data.get(key_name):
+        check_step("AI Translator", True, f"Provider = '{provider}' (key set)")
+    elif key_name:
+        check_step("AI Translator", True, f"'{provider}' selected but {key_name} is empty -> offline mode (exact commands only)")
+    else:
+        check_step("AI Translator", True, "Offline mode (exact commands only)")
 
     # Constructive Memory Initialization
     try:
@@ -122,7 +140,7 @@ def main():
         test_cmd = "echo 'TG_TEST_OK'"
         res = os_bridge.run_command(test_cmd, timeout=5)
         cmd_ok = "TG_TEST_OK" in res.get("stdout", "")
-        check_step("Shell Execution Bridge", cmd_ok, f"Shell exit code: {res.get('exit_code')}")
+        all_ok &= check_step("Shell Execution Bridge", cmd_ok, f"Shell exit code: {res.get('exit_code')}")
     except Exception as e:
         all_ok &= check_step("Shell Execution Bridge", False, str(e))
 
@@ -158,7 +176,7 @@ def main():
             print("  • Double click 'start_agent_silent.vbs' to launch silently in background.")
             print("  • Run 'install_autostart.bat' to auto-launch on every Windows boot.")
         elif is_mac or is_linux:
-            print("  • Run: python3 main.py")
+            print("  • Run: python3 main.py   (or bash install_autostart_mac.sh / install_autostart_linux.sh)")
     else:
         print("⚠️ Some checks failed. Please fix the items marked [❌ FAIL] above before launching.")
         sys.exit(1)

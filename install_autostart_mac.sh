@@ -6,7 +6,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_FILE="$PLIST_DIR/com.hermes.tgsystemcontrol.plist"
 
-mkdir -p "$PLIST_DIR"
+mkdir -p "$PLIST_DIR" "$DIR/temp"
 
 PYTHON_BIN="$DIR/.venv/bin/python3"
 if [ ! -f "$PYTHON_BIN" ]; then

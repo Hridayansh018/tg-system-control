@@ -6,7 +6,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/tg-system-control.service"
 
-mkdir -p "$SERVICE_DIR"
+mkdir -p "$SERVICE_DIR" "$DIR/temp"
 
 PYTHON_BIN="$DIR/.venv/bin/python3"
 if [ ! -f "$PYTHON_BIN" ]; then
@@ -22,11 +22,15 @@ echo "Python Binary:     $PYTHON_BIN"
 cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=TG-System-Control Desktop Remote Controller
-After=network.target
+After=network-online.target graphical-session.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=$DIR
+# Screenshots / mouse / keyboard need the graphical session (X11). Adjust if your display differs.
+Environment=DISPLAY=${DISPLAY:-:0}
+Environment=XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
 ExecStart=$PYTHON_BIN -u $DIR/main.py
 Restart=always
 RestartSec=5
