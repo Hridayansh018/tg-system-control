@@ -142,7 +142,7 @@ WEB_SHORTCUTS = {
 
 
 def launch_app(app_name: str) -> dict:
-    """Launches an application or website by common name, URL, or executable path."""
+    """Launches an application or website on the user's interactive desktop."""
     app_lower = app_name.lower().strip()
 
     # 1. Check for Web / URL / Website requests (e.g. 'edge : open gmail app' or 'open youtube')
@@ -162,40 +162,50 @@ def launch_app(app_name: str) -> dict:
     if target_url:
         is_app_mode = any(w in app_lower for w in ["app", "gui", "standalone", "pwa"])
         if IS_WINDOWS:
-            browser = "chrome" if "chrome" in app_lower else "msedge"
-            if is_app_mode:
-                # Launch as standalone dedicated GUI window (no browser tabs/address bar)
-                ps_cmd = f'Start-Process {browser} -ArgumentList "--app={target_url}"; Start-Sleep -Milliseconds 700; $ws = New-Object -ComObject WScript.Shell; $ws.AppActivate("{site_key if site_key else "Edge"}")'
-            else:
-                ps_cmd = f'Start-Process {browser} -ArgumentList "{target_url}"; Start-Sleep -Milliseconds 700; $ws = New-Object -ComObject WScript.Shell; $ws.AppActivate("Edge")'
-            return run_command(ps_cmd)
+            try:
+                if is_app_mode:
+                    # Launch standalone native PWA window via Edge
+                    subprocess.Popen(f'cmd.exe /c start msedge --app="{target_url}"', shell=True)
+                else:
+                    os.startfile(f"microsoft-edge:{target_url}")
+                return {"exit_code": 0, "stdout": f"Opened {target_url} in Edge", "stderr": ""}
+            except Exception as e:
+                return {"exit_code": -1, "stdout": "", "stderr": str(e)}
         elif IS_MAC:
             app_flag = "-a 'Google Chrome'" if "chrome" in app_lower else ("-a 'Microsoft Edge'" if "edge" in app_lower else "")
             return run_command(f'open {app_flag} "{target_url}"')
 
-    # 2. Local Applications Map
+    # 2. Local Applications Map (Using Windows ShellExecute via os.startfile for direct GUI display)
     if IS_WINDOWS:
-        app_map = {
-            "chrome": "start chrome",
-            "edge": "start msedge",
-            "msedge": "start msedge",
-            "antigravity": r'start "" "$env:LOCALAPPDATA\Programs\antigravity\Antigravity.exe"',
-            "antigravity ide": r'start "" "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe"',
-            "vscode": "code",
-            "notepad": "notepad",
-            "calc": "calc",
-            "calculator": "calc",
-            "explorer": "explorer",
-            "taskmgr": "taskmgr",
-            "task manager": "taskmgr",
+        app_exec_map = {
+            "edge": "msedge.exe",
+            "msedge": "msedge.exe",
+            "chrome": "chrome.exe",
+            "notepad": "notepad.exe",
+            "calc": "calc.exe",
+            "calculator": "calc.exe",
+            "explorer": "explorer.exe",
+            "taskmgr": "taskmgr.exe",
+            "task manager": "taskmgr.exe",
+            "antigravity": os.path.expandvars(r"%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe"),
+            "vscode": "code.cmd",
         }
-        # Check if any mapped app is in the text (e.g. 'open edge app' -> 'edge')
-        for k, cmd in app_map.items():
-            if k in app_lower.split():
-                return run_command(cmd)
+        for k, target_exe in app_exec_map.items():
+            if k in app_lower.split() or k == app_lower:
+                try:
+                    os.startfile(target_exe)
+                    return {"exit_code": 0, "stdout": f"Launched {k} on desktop", "stderr": ""}
+                except Exception as e:
+                    # Fallback to shell start
+                    return run_command(f'start "" "{target_exe}"')
 
-        cmd = app_map.get(app_lower, f'start "{app_name}"')
-        return run_command(cmd)
+        # Generic launch fallback
+        try:
+            os.startfile(app_name)
+            return {"exit_code": 0, "stdout": f"Started {app_name}", "stderr": ""}
+        except Exception:
+            return run_command(f'start "" "{app_name}"')
+
     elif IS_MAC:
         app_map = {
             "chrome": "open -a 'Google Chrome'",
@@ -209,6 +219,7 @@ def launch_app(app_name: str) -> dict:
 
         cmd = app_map.get(app_lower, f"open -a '{app_name}'")
         return run_command(cmd)
+
     return {"exit_code": -1, "stdout": "", "stderr": "Unsupported platform"}
 
 
@@ -235,21 +246,18 @@ def list_top_processes(limit: int = 10) -> str:
 
 
 # ----------------------------------------------------------------------
-# GUI AUTOMATION: Mouse Movement, Clicks, Keystrokes & Hotkeys
+# GUI AUTOMATION: Direct Native OS Mouse & Hardware Keyboard Keystrokes
 # ----------------------------------------------------------------------
 
 def mouse_move(x: int, y: int) -> bool:
-    """Moves the mouse cursor to screen coordinates (x, y)."""
+    """Moves the mouse cursor directly on the physical display."""
     if IS_WINDOWS:
         try:
             import ctypes
-            if ctypes.windll.user32.SetCursorPos(int(x), int(y)):
-                return True
+            ctypes.windll.user32.SetCursorPos(int(x), int(y))
+            return True
         except Exception:
             pass
-        ps = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({int(x)}, {int(y)})"
-        res = run_command(ps, timeout=5)
-        return res["exit_code"] == 0
     elif IS_MAC:
         res = run_command(f"osascript -e 'tell application \"System Events\" to set the position of the mouse cursor to {{{int(x)}, {int(y)}}}'")
         return res["exit_code"] == 0
@@ -257,7 +265,7 @@ def mouse_move(x: int, y: int) -> bool:
 
 
 def mouse_click(x: int = None, y: int = None, button: str = "left", double: bool = False) -> bool:
-    """Clicks at coordinates (x, y) or current cursor position."""
+    """Performs direct hardware mouse click on active screen."""
     if x is not None and y is not None:
         mouse_move(x, y)
         time.sleep(0.05)
@@ -266,18 +274,17 @@ def mouse_click(x: int = None, y: int = None, button: str = "left", double: bool
     if IS_WINDOWS:
         try:
             import ctypes
-            # Left down/up: 0x02, 0x04 | Right down/up: 0x08, 0x10
             down = 0x0008 if btn == "right" else 0x0002
             up = 0x0010 if btn == "right" else 0x0004
             ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
             ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
             if double:
-                time.sleep(0.1)
+                time.sleep(0.08)
                 ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
                 ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
             return True
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[GUI] mouse_click error: {e}")
 
     elif IS_MAC:
         click_type = "double click" if double else "click"
@@ -288,24 +295,22 @@ def mouse_click(x: int = None, y: int = None, button: str = "left", double: bool
 
 
 def type_text(text: str) -> bool:
-    """Types plain text into the currently focused window."""
+    """Types plain text directly into whatever window is currently active/focused."""
     if IS_WINDOWS:
-        # Escape characters that SendKeys treats as modifiers: + ^ % ~ ( ) { } [ ]
-        safe_text = ""
-        for ch in text:
-            if ch in "+^%~(){}[]":
-                safe_text += f"{{{ch}}}"
-            else:
-                safe_text += ch
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            KEYEVENTF_UNICODE = 0x0004
+            KEYEVENTF_KEYUP = 0x0002
 
-        ps = f"""
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.SendKeys]::SendWait(@'
-{safe_text}
-'@)
-"""
-        res = run_command(ps, timeout=10)
-        return res["exit_code"] == 0
+            for ch in text:
+                code = ord(ch)
+                u32.keybd_event(0, code, KEYEVENTF_UNICODE, 0)
+                u32.keybd_event(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0)
+                time.sleep(0.005)
+            return True
+        except Exception as e:
+            print(f"[GUI] type_text error: {e}")
 
     elif IS_MAC:
         escaped = text.replace('\\', '\\\\').replace('"', '\\"')
@@ -316,29 +321,38 @@ Add-Type -AssemblyName System.Windows.Forms
 
 
 def press_key(key_name: str) -> bool:
-    """Presses a single special key (enter, tab, esc, space, backspace, up, down, left, right)."""
+    """Presses a single hardware key (enter, tab, esc, space, backspace, etc.)."""
     k = key_name.lower().strip()
     if IS_WINDOWS:
-        key_map = {
-            "enter": "{ENTER}",
-            "return": "{ENTER}",
-            "tab": "{TAB}",
-            "esc": "{ESC}",
-            "escape": "{ESC}",
-            "space": " ",
-            "backspace": "{BS}",
-            "bs": "{BS}",
-            "up": "{UP}",
-            "down": "{DOWN}",
-            "left": "{LEFT}",
-            "right": "{RIGHT}",
-            "delete": "{DEL}",
-            "del": "{DEL}",
-        }
-        send_code = key_map.get(k, f"{{{k.upper()}}}")
-        ps = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{send_code}')"
-        res = run_command(ps, timeout=5)
-        return res["exit_code"] == 0
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            KEYEVENTF_KEYUP = 0x0002
+
+            vk_map = {
+                "enter": 0x0D,
+                "return": 0x0D,
+                "tab": 0x09,
+                "esc": 0x1B,
+                "escape": 0x1B,
+                "space": 0x20,
+                "backspace": 0x08,
+                "bs": 0x08,
+                "up": 0x26,
+                "down": 0x28,
+                "left": 0x25,
+                "right": 0x27,
+                "delete": 0x2E,
+                "del": 0x2E,
+            }
+            if k in vk_map:
+                vk = vk_map[k]
+                u32.keybd_event(vk, 0, 0, 0)
+                time.sleep(0.02)
+                u32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                return True
+        except Exception as e:
+            print(f"[GUI] press_key error: {e}")
 
     elif IS_MAC:
         mac_key_map = {
@@ -354,37 +368,52 @@ def press_key(key_name: str) -> bool:
             "right": "key code 124",
         }
         action = mac_key_map.get(k, f'keystroke "{k}"')
-        res = run_command(f"osascript -e 'tell application \"System Events\" to {action}'")
-        return res["exit_code"] == 0
+        return run_command(f"osascript -e 'tell application \"System Events\" to {action}'")["exit_code"] == 0
 
     return False
 
 
 def press_hotkey(hotkey_str: str) -> bool:
-    """Presses a hotkey combination (e.g. 'ctrl+c', 'ctrl+v', 'alt+tab', 'ctrl+a', 'win+d')."""
+    """Presses hardware hotkey combinations (win+d, ctrl+c, ctrl+v, alt+tab, etc.)."""
     hk = hotkey_str.lower().strip().replace(" ", "")
     if IS_WINDOWS:
-        # SendKeys representation: ^ = Ctrl, % = Alt, + = Shift
-        hotkey_map = {
-            "ctrl+c": "^c",
-            "ctrl+v": "^v",
-            "ctrl+x": "^x",
-            "ctrl+a": "^a",
-            "ctrl+s": "^s",
-            "ctrl+z": "^z",
-            "alt+tab": "%{TAB}",
-            "alt+f4": "%{F4}",
-            "enter": "{ENTER}",
-        }
-        if hk in hotkey_map:
-            code = hotkey_map[hk]
-            ps = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{code}')"
-            res = run_command(ps, timeout=5)
-            return res["exit_code"] == 0
-        elif hk in ["win+d", "win+m"]:
-            ps = "(New-Object -ComObject Shell.Application).MinimizeAll()"
-            res = run_command(ps, timeout=5)
-            return res["exit_code"] == 0
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            KEYEVENTF_KEYUP = 0x0002
+
+            VK_LWIN = 0x5B
+            VK_CONTROL = 0x11
+            VK_MENU = 0x12  # Alt
+            VK_TAB = 0x09
+
+            if hk in ["win+d", "win+m"]:
+                u32.keybd_event(VK_LWIN, 0, 0, 0)
+                u32.keybd_event(0x44, 0, 0, 0)  # 'D'
+                time.sleep(0.02)
+                u32.keybd_event(0x44, 0, KEYEVENTF_KEYUP, 0)
+                u32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+                return True
+
+            elif hk == "alt+tab":
+                u32.keybd_event(VK_MENU, 0, 0, 0)
+                u32.keybd_event(VK_TAB, 0, 0, 0)
+                time.sleep(0.05)
+                u32.keybd_event(VK_TAB, 0, KEYEVENTF_KEYUP, 0)
+                u32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+                return True
+
+            elif hk in ["ctrl+c", "ctrl+v", "ctrl+a", "ctrl+z", "ctrl+s", "ctrl+x"]:
+                char_key = ord(hk[-1].upper())
+                u32.keybd_event(VK_CONTROL, 0, 0, 0)
+                u32.keybd_event(char_key, 0, 0, 0)
+                time.sleep(0.02)
+                u32.keybd_event(char_key, 0, KEYEVENTF_KEYUP, 0)
+                u32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+                return True
+
+        except Exception as e:
+            print(f"[GUI] press_hotkey error: {e}")
 
     elif IS_MAC:
         if hk in ["cmd+c", "ctrl+c"]:
