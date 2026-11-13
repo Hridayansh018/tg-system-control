@@ -132,6 +132,9 @@ def launch_app(app_name: str) -> dict:
         app_map = {
             "chrome": "start chrome",
             "edge": "start msedge",
+            "antigravity": r'start "" "$env:LOCALAPPDATA\Programs\antigravity\Antigravity.exe"',
+            "antigravity ide": r'start "" "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe"',
+            "vscode": "code",
             "notepad": "notepad",
             "calc": "calc",
             "calculator": "calc",
