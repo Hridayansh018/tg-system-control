@@ -725,6 +725,7 @@ def focus_and_maximize_window(query: str = "edge") -> bool:
         try:
             import ctypes
             u32 = ctypes.windll.user32
+            k32 = ctypes.windll.kernel32
             found_hwnd = None
 
             def enum_proc(hwnd, lparam):
@@ -742,8 +743,18 @@ def focus_and_maximize_window(query: str = "edge") -> bool:
             WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
             u32.EnumWindows(WNDENUMPROC(enum_proc), 0)
             if found_hwnd:
-                u32.ShowWindow(found_hwnd, 3)  # SW_MAXIMIZE = 3
+                fore = u32.GetForegroundWindow()
+                tid_fore = u32.GetWindowThreadProcessId(fore, None)
+                tid_cur = k32.GetCurrentThreadId()
+
+                u32.AllowSetForegroundWindow(0x0000FFFF)
+                u32.AttachThreadInput(tid_cur, tid_fore, True)
+                u32.keybd_event(0x12, 0, 0, 0)
+                u32.ShowWindow(found_hwnd, 3)
+                u32.BringWindowToTop(found_hwnd)
                 u32.SetForegroundWindow(found_hwnd)
+                u32.keybd_event(0x12, 0, 2, 0)
+                u32.AttachThreadInput(tid_cur, tid_fore, False)
                 time.sleep(0.5)
                 return True
         except Exception as e:
@@ -754,7 +765,12 @@ def focus_and_maximize_window(query: str = "edge") -> bool:
 def automate_chatgpt(prompt: str, new_chat: bool = True) -> dict:
     """Automates Microsoft Edge to open ChatGPT, start a fresh conversation, enter prompt, and submit."""
     # 1. Launch / Focus Edge with ChatGPT
-    launch_app("edge chatgpt")
+    edge_paths = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    edge_bin = next((p for p in edge_paths if os.path.exists(p)), "msedge.exe")
+    subprocess.Popen(f'cmd.exe /c start "" "{edge_bin}" "https://chatgpt.com"', shell=True)
     time.sleep(3.5)
 
     # 2. Maximize and bring Edge to foreground
@@ -766,7 +782,7 @@ def automate_chatgpt(prompt: str, new_chat: bool = True) -> dict:
         press_hotkey("ctrl+shift+o")  # ChatGPT shortcut for New Chat
         time.sleep(1.5)
 
-    # 4. Focus prompt box: click in center bottom area or press '/'
+    # 4. Focus prompt box
     width, height = 1920, 1200
     if IS_WINDOWS:
         try:
@@ -779,8 +795,11 @@ def automate_chatgpt(prompt: str, new_chat: bool = True) -> dict:
     target_x = int(width * 0.5)
     target_y = int(height * 0.88)
     with UserInputLock("ChatGPT Automate"):
+        # Click bottom input area (if existing chat) and mid input area (if new chat)
         mouse_click(target_x, target_y)
-        time.sleep(0.3)
+        time.sleep(0.2)
+        mouse_click(target_x, int(height * 0.44))
+        time.sleep(0.2)
 
         # 5. Inject prompt via clipboard
         set_clipboard(prompt)
