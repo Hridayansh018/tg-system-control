@@ -25,7 +25,13 @@ def send_message(chat_id: str, text: str, parse_mode: str = "Markdown", reply_ma
 
     try:
         res = requests.post(url, json=payload, timeout=15)
-        return res.json()
+        data = res.json()
+        if not data.get("ok") and "can't parse entities" in data.get("description", "").lower():
+            # Retry without parse_mode
+            payload.pop("parse_mode", None)
+            res = requests.post(url, json=payload, timeout=15)
+            data = res.json()
+        return data
     except Exception as e:
         print(f"[Telegram Client] sendMessage error: {e}")
         return {"ok": False, "error": str(e)}
