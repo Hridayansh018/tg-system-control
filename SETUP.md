@@ -234,20 +234,60 @@ During setup, an append-only constructive memory file (`memory.md`) is automatic
   nohup python3 main.py > /dev/null 2>&1 &
   ```
 
-### Windows Auto-Start on System Boot
-To have the bot start automatically every time your PC turns on:
-1. Double-click `install_autostart.bat`.
-2. It places a shortcut in `shell:startup`.
-3. From your next boot, the bot will start silently and send `🟢 System ONLINE` to your Telegram!
-*(To remove: run `uninstall_autostart.bat`)*
+---
+
+## 🔄 8. Automatic Startup on Boot (Hands-Free Device Setup)
+
+To ensure the Telegram bot starts automatically on every system boot without requiring you to open a terminal or touch your computer:
+
+### A. Windows (Auto-Start via Startup Folder)
+1. **1-Click Installer:** Double-click `install_autostart.bat`.
+2. **What It Does:** It creates a silent shortcut `TGSystemControl.lnk` inside your Windows Startup directory (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`).
+3. **Execution:** On every Windows login/reboot, Windows automatically executes `start_agent_silent.vbs`, warms up all required packages, and sends `🟢 SYSTEM ONLINE ⚡` to Telegram.
+4. **Verify:** Press `Win + R`, type `shell:startup`, and verify `TGSystemControl.lnk` is present.
+5. **Uninstall:** Run `uninstall_autostart.bat` to remove auto-start.
+
+### B. macOS (Auto-Start via launchd User Agent)
+1. **1-Click Installer:** Run:
+   ```bash
+   bash install_autostart_mac.sh
+   ```
+2. **What It Does:** Generates a `launchd` plist at `~/Library/LaunchAgents/com.hermes.tgsystemcontrol.plist` with `RunAtLoad` and `KeepAlive` set to `true`.
+3. **Execution:** macOS automatically launches the daemon on user login and restarts it if closed.
+4. **Verify:**
+   ```bash
+   launchctl list | grep tgsystemcontrol
+   ```
+5. **Uninstall:**
+   ```bash
+   launchctl unload ~/Library/LaunchAgents/com.hermes.tgsystemcontrol.plist
+   rm ~/Library/LaunchAgents/com.hermes.tgsystemcontrol.plist
+   ```
+
+### C. Linux (Auto-Start via systemd User Service)
+1. **1-Click Installer:** Run:
+   ```bash
+   bash install_autostart_linux.sh
+   ```
+2. **What It Does:** Creates a `systemd` user service unit at `~/.config/systemd/user/tg-system-control.service` and enables user lingering via `loginctl enable-linger $USER` (allowing the bot to run even when logged out).
+3. **Execution:** Starts immediately and automatically re-launches on system boot with auto-restart on network interruptions.
+4. **Verify:**
+   ```bash
+   systemctl --user status tg-system-control
+   ```
+5. **Uninstall:**
+   ```bash
+   systemctl --user disable --now tg-system-control
+   rm ~/.config/systemd/user/tg-system-control.service
+   ```
 
 ---
 
-## 🛑 How to Stop
+## 🛑 9. How to Stop the Bot
 - **Console Mode:** Press `Ctrl + C` in the terminal.
 - **Background Mode (Windows):** Double-click `stop_agent.bat`.
 - **Background Mode (macOS/Linux):**
   ```bash
   pkill -f "python.*main.py"
   ```
-Whenever stopped, the bot automatically sends `🔴 System OFFLINE` to Telegram.
+Whenever stopped, the bot automatically intercepts the exit signal and dispatches `🔴 System OFFLINE` to Telegram.
