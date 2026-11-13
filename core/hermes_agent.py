@@ -14,7 +14,19 @@ import config
 SYSTEM_PROMPT = """You are Hermes Agent, a powerful desktop AI assistant running locally on the user's computer.
 You have direct execution capability to control the PC using specific tool actions.
 
-When the user asks you to do something, you can choose to execute a tool by replying in JSON format:
+When the user asks you to do something, you can choose to execute tools by replying in JSON format:
+```json
+{
+  "actions": [
+    {
+      "action": "<tool_name>",
+      "parameters": { ... }
+    }
+  ],
+  "message": "Optional friendly reply to user"
+}
+```
+Or for a single action:
 ```json
 {
   "action": "<tool_name>",
@@ -26,14 +38,28 @@ Available Tools:
 1. `take_screenshot`: Captures the current desktop screen. No parameters required.
 2. `get_system_stats`: Returns CPU, RAM, Disk, and OS metrics. No parameters required.
 3. `execute_command`: Runs any command in PowerShell (Windows) or Bash (Mac). Parameters: `{"command": "string"}`.
-4. `launch_app`: Opens an application. Parameters: `{"app_name": "string"}` (e.g. "chrome", "edge", "notepad", "calc").
-5. `list_processes`: Lists top running processes by CPU. Parameters: `{"limit": 10}`.
-6. `lock_pc`: Locks the workstation screen. No parameters required.
-7. `mouse_click`: Clicks the mouse at screen coordinates (x, y) or current position. Parameters: `{"x": int, "y": int, "button": "left"|"right", "double": bool}`.
-8. `mouse_move`: Moves mouse cursor to (x, y). Parameters: `{"x": int, "y": int}`.
-9. `type_text`: Types plain text into the active focused window. Parameters: `{"text": "string"}`.
-10. `press_key`: Presses a special key. Parameters: `{"key": "enter"|"tab"|"esc"|"space"|"backspace"}`.
-11. `press_hotkey`: Presses a hotkey combination. Parameters: `{"hotkey": "ctrl+c"|"ctrl+v"|"alt+tab"|"win+d"}`.
+4. `launch_app`: Opens an application or website. Parameters: `{"app_name": "string"}` (e.g. "edge", "chrome", "notepad", "calc", "chatgpt", "youtube studio").
+5. `focus_window`: Brings an existing open window to the front. Parameters: `{"window_title": "string"}` (e.g. "chatgpt", "edge", "chrome").
+6. `close_app`: Closes an application or website tab. Parameters: `{"target": "string"}` (e.g. "edge", "notepad", "youtube studio").
+7. `list_processes`: Lists top running processes by CPU. Parameters: `{"limit": 10}`.
+8. `lock_pc`: Locks the workstation screen. No parameters required.
+9. `mouse_click`: Clicks the mouse at screen coordinates (x, y) or current position. Parameters: `{"x": int, "y": int, "button": "left"|"right", "double": bool}`.
+10. `mouse_move`: Moves mouse cursor to (x, y). Parameters: `{"x": int, "y": int}`.
+11. `type_text`: Types plain text into the active focused window. Parameters: `{"text": "string"}`.
+12. `press_key`: Presses a special key. Parameters: `{"key": "enter"|"tab"|"esc"|"space"|"backspace"}`.
+13. `press_hotkey`: Presses a hotkey combination. Parameters: `{"hotkey": "ctrl+c"|"ctrl+v"|"ctrl+w"|"alt+tab"|"win+d"}`.
+
+CRITICAL RULES FOR MULTI-STEP AUTOMATION:
+- When the user asks to DO something in an app (e.g. "generate thumbnails using chatgpt", "search youtube for song", "open notepad and write note"):
+  NEVER just launch the app and stop! You MUST output the ENTIRE action pipeline in your JSON `actions` array:
+  [
+    {"action": "launch_app", "parameters": {"app_name": "chatgpt"}},
+    {"action": "type_text", "parameters": {"text": "Generate 3 eye-catching YouTube thumbnail concepts for..."}},
+    {"action": "press_key", "parameters": {"key": "enter"}},
+    {"action": "take_screenshot"}
+  ]
+- Do NOT say "Abhi main prompt type kar deta hoon" in your message unless `type_text` is included in the JSON `actions` array!
+- If the app is already opened, use `focus_window`, followed by `type_text`, `press_key`, and `take_screenshot`.
 
 If the user asks a normal question that requires no tool execution, just reply with helpful text normally.
 Be concise, helpful, and speak in Hinglish/English as the user prefers.
@@ -179,9 +205,21 @@ class HermesAgent:
             memory_logger.log_entry("GUI_KEYBOARD_TYPE", f"Typed text ({len(txt)} chars)", details={"preview": txt[:100], "success": ok})
             return {"text": f"⌨️ Typed: `{txt[:100]}` (User input safely locked & restored)", "photo": None}
 
-        # 9. GUI: Press Key (/key enter or key: esc)
-        if any(user_lower.startswith(p) for p in ["/key ", "key: ", "press "]):
-            k = re.sub(r"^(/key\s+|key:\s*|press\s+)", "", user_text, flags=re.IGNORECASE).strip()
+        # 8b. GUI: Type & Press Enter (Compound action for forms/search/chatgpt prompt box)
+        if any(user_lower.startswith(p) for p in ["/prompt ", "prompt: ", "type and enter: ", "enter prompt: "]):
+            txt = re.sub(r"^(/prompt\s+|prompt:\s*|type and enter:\s*|enter prompt:\s*)", "", user_text, flags=re.IGNORECASE).strip()
+            with os_bridge.UserInputLock("Type & Enter Prompt"):
+                ok = os_bridge.type_text(txt)
+                time.sleep(0.3)
+                os_bridge.press_key("enter")
+            memory_logger.log_entry("GUI_TYPE_AND_ENTER", f"Typed and submitted prompt ({len(txt)} chars)", details={"preview": txt[:100], "success": ok})
+            return {"text": f"⌨️ *Prompt Typed & Submitted (Enter pressed):*\n`{txt[:250]}`\n\n📸 *Tip:* Send `/shot` after a few seconds to see the result!", "photo": None}
+
+        # 9. GUI: Press Key (/key enter or key: esc or press enter)
+        if user_lower in ["enter", "hit enter", "press enter"] or any(user_lower.startswith(p) for p in ["/key ", "key: ", "press ", "hit "]):
+            k = re.sub(r"^(/key\s+|key:\s*|press\s+|hit\s+)", "", user_text, flags=re.IGNORECASE).strip()
+            if not k:
+                k = "enter"
             with os_bridge.UserInputLock(f"Key Press {k}"):
                 ok = os_bridge.press_key(k)
             memory_logger.log_entry("GUI_KEY_PRESS", f"Pressed key: {k}", details={"key": k, "success": ok})
@@ -226,66 +264,100 @@ class HermesAgent:
 
         reply_raw = llm_res.get("reply", "")
 
-        # Check if LLM emitted a JSON tool call
-        json_match = re.search(r"```json\s*(\{.*?\})\s*```", reply_raw, re.DOTALL)
+        # Check if LLM emitted JSON tool action(s)
+        json_match = re.search(r"```json\s*(\{.*?\}|\[.*?\])\s*```", reply_raw, re.DOTALL)
         if json_match:
             try:
-                action_data = json.loads(json_match.group(1))
-                act = action_data.get("action")
-                params = action_data.get("parameters", {})
+                data = json.loads(json_match.group(1))
+                if isinstance(data, list):
+                    actions_list = data
+                    reply_msg = ""
+                elif isinstance(data, dict):
+                    actions_list = data.get("actions") or [data]
+                    reply_msg = data.get("message", "")
+                else:
+                    actions_list = []
+                    reply_msg = ""
 
-                if act == "take_screenshot":
-                    out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time())}.jpg"
-                    ok = os_bridge.take_screenshot(out_file)
-                    return {"text": "📸 *Desktop Screenshot Captured!*", "photo": str(out_file) if ok else None}
+                photo_to_send = None
+                executed_logs = []
 
-                elif act == "get_system_stats":
-                    stats = os_bridge.get_system_stats()
-                    return {"text": f"📊 *System Stats:* CPU: {stats.get('cpu_cores')} cores | RAM: {stats.get('ram_used_pct')}% used | Disk: {stats.get('disk_free_gb')} GB free", "photo": None}
+                for item in actions_list:
+                    act = item.get("action")
+                    params = item.get("parameters", {})
 
-                elif act == "execute_command":
-                    cmd = params.get("command", "")
-                    res = os_bridge.run_command(cmd)
-                    return {"text": f"Output:\n```\n{(res['stdout'] or res['stderr'])[:3500]}\n```", "photo": None}
+                    if act == "launch_app":
+                        app = params.get("app_name", "")
+                        os_bridge.launch_app(app)
+                        executed_logs.append(f"Launched {app}")
+                        # If more actions follow (like typing), allow page/browser time to load and gain focus
+                        time.sleep(3.0 if any(b in app.lower() for b in ["edge", "chrome", "chatgpt", "browser", "http"]) else 1.5)
 
-                elif act == "launch_app":
-                    app = params.get("app_name", "")
-                    os_bridge.launch_app(app)
-                    return {"text": f"🚀 Launched *{app}* on PC!", "photo": None}
+                    elif act == "focus_window":
+                        win_title = params.get("window_title", "")
+                        ok = os_bridge.focus_window(win_title)
+                        executed_logs.append(f"Focused window '{win_title}'")
+                        time.sleep(0.5)
 
-                elif act == "lock_pc":
-                    os_bridge.lock_workstation()
-                    return {"text": "🔒 *Workstation Locked!*", "photo": None}
+                    elif act == "close_app":
+                        target = params.get("target", "")
+                        os_bridge.close_app(target)
+                        executed_logs.append(f"Closed {target}")
 
-                elif act == "mouse_click":
-                    x = params.get("x")
-                    y = params.get("y")
-                    btn = params.get("button", "left")
-                    dbl = params.get("double", False)
-                    with os_bridge.UserInputLock("LLM Mouse Click"):
-                        os_bridge.mouse_click(x, y, btn, dbl)
-                    return {"text": f"🖱️ Clicked at ({x}, {y})", "photo": None}
+                    elif act == "type_text":
+                        txt = params.get("text", "")
+                        with os_bridge.UserInputLock("LLM Keyboard Type"):
+                            os_bridge.type_text(txt)
+                        executed_logs.append(f"Typed: `{txt[:40]}`")
+                        time.sleep(0.3)
 
-                elif act == "type_text":
-                    txt = params.get("text", "")
-                    with os_bridge.UserInputLock("LLM Keyboard Type"):
-                        os_bridge.type_text(txt)
-                    return {"text": f"⌨️ Typed: `{txt}`", "photo": None}
+                    elif act == "press_key":
+                        k = params.get("key", "enter")
+                        with os_bridge.UserInputLock(f"LLM Key Press {k}"):
+                            os_bridge.press_key(k)
+                        executed_logs.append(f"Pressed {k.upper()}")
+                        time.sleep(0.3)
 
-                elif act == "press_key":
-                    k = params.get("key", "enter")
-                    with os_bridge.UserInputLock(f"LLM Key Press {k}"):
-                        os_bridge.press_key(k)
-                    return {"text": f"🔘 Pressed key *{k.upper()}*", "photo": None}
+                    elif act == "press_hotkey":
+                        hk = params.get("hotkey", "")
+                        with os_bridge.UserInputLock(f"LLM Hotkey {hk}"):
+                            os_bridge.press_hotkey(hk)
+                        executed_logs.append(f"Pressed hotkey {hk.upper()}")
 
-                elif act == "press_hotkey":
-                    hk = params.get("hotkey", "")
-                    with os_bridge.UserInputLock(f"LLM Hotkey {hk}"):
-                        os_bridge.press_hotkey(hk)
-                    return {"text": f"⚡ Pressed hotkey *{hk.upper()}*", "photo": None}
+                    elif act == "mouse_click":
+                        x = params.get("x")
+                        y = params.get("y")
+                        btn = params.get("button", "left")
+                        dbl = params.get("double", False)
+                        with os_bridge.UserInputLock("LLM Mouse Click"):
+                            os_bridge.mouse_click(x, y, btn, dbl)
+                        executed_logs.append(f"Clicked ({x}, {y})")
 
-            except Exception:
-                pass
+                    elif act == "take_screenshot":
+                        out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time())}.jpg"
+                        ok = os_bridge.take_screenshot(out_file)
+                        if ok and out_file.exists():
+                            photo_to_send = str(out_file)
+                        executed_logs.append("Captured screenshot")
+
+                    elif act == "get_system_stats":
+                        stats = os_bridge.get_system_stats()
+                        executed_logs.append(f"CPU: {stats.get('cpu_cores')} cores | RAM: {stats.get('ram_used_pct')}%")
+
+                    elif act == "execute_command":
+                        cmd = params.get("command", "")
+                        res = os_bridge.run_command(cmd)
+                        executed_logs.append(f"Executed: `{cmd[:40]}` (Exit {res['exit_code']})")
+
+                    elif act == "lock_pc":
+                        os_bridge.lock_workstation()
+                        executed_logs.append("Locked workstation")
+
+                summary = reply_msg or ("⚡ *Actions Completed:*\n• " + "\n• ".join(executed_logs))
+                return {"text": summary, "photo": photo_to_send}
+
+            except Exception as e:
+                print(f"[HermesAgent] Tool execution error: {e}")
 
         # Return standard conversational reply
         return {"text": reply_raw, "photo": None}

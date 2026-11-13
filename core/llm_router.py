@@ -11,25 +11,40 @@ import config
 
 
 def call_gemini(prompt: str, system_prompt: str, tools_schema: list = None) -> dict:
-    """Calls Google AI Studio Gemini API."""
+    """Calls Google AI Studio Gemini API with reliable model fallback."""
     key = config.GEMINI_API_KEY
     if not key:
         return {"error": "GEMINI_API_KEY is not set in .env"}
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-    }
-    try:
-        res = requests.post(url, json=payload, timeout=25)
-        data = res.json()
-        if "error" in data:
-            return {"error": data["error"].get("message", "Gemini API error")}
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return {"reply": text}
-    except Exception as e:
-        return {"error": f"Gemini connection error: {e}"}
+    models_to_try = [
+        "gemini-flash-lite-latest",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-latest",
+    ]
+    last_error = "Unknown error"
+
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+        }
+        try:
+            res = requests.post(url, json=payload, timeout=25)
+            data = res.json()
+            if "error" in data:
+                last_error = data["error"].get("message", f"Gemini {model_name} error")
+                continue
+            candidates = data.get("candidates", [])
+            if candidates and "content" in candidates[0]:
+                parts = candidates[0]["content"].get("parts", [])
+                if parts and "text" in parts[0]:
+                    return {"reply": parts[0]["text"]}
+        except Exception as e:
+            last_error = f"Gemini connection error on {model_name}: {e}"
+            continue
+
+    return {"error": last_error}
 
 
 def call_openrouter(prompt: str, system_prompt: str) -> dict:

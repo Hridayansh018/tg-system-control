@@ -613,3 +613,40 @@ def press_hotkey(hotkey_str: str) -> bool:
             return run_command("osascript -e 'tell application \"System Events\" to keystroke \"a\" using command down'")["exit_code"] == 0
 
     return False
+
+
+def focus_window(title_query: str) -> bool:
+    """Finds a window by title (case-insensitive substring) and brings it to the foreground."""
+    q = title_query.lower().strip()
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            found_hwnd = None
+
+            def enum_proc(hwnd, lparam):
+                nonlocal found_hwnd
+                if u32.IsWindowVisible(hwnd):
+                    length = u32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        u32.GetWindowTextW(hwnd, buff, length + 1)
+                        if q in buff.value.lower():
+                            found_hwnd = hwnd
+                            return False
+                return True
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            u32.EnumWindows(WNDENUMPROC(enum_proc), 0)
+            if found_hwnd:
+                u32.ShowWindow(found_hwnd, 9)  # SW_RESTORE
+                u32.SetForegroundWindow(found_hwnd)
+                time.sleep(0.3)
+                return True
+        except Exception as e:
+            print(f"[GUI] focus_window error: {e}")
+    elif IS_MAC:
+        script = f'''osascript -e 'tell application "System Events" to set frontmost of first process whose name contains "{q}" to true' '''
+        return run_command(script)["exit_code"] == 0
+
+    return False
