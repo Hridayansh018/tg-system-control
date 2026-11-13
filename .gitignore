@@ -1,0 +1,9 @@
+# Git ignore for tg-system-control
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+screenshots/
+temp/
+.DS_Store
