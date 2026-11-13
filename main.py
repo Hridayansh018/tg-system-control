@@ -36,13 +36,17 @@ def main():
     # 2. Dispatch ONLINE notification & set bot bio status
     system_lifecycle.notify_online()
 
-    # 3. Start polling loop
-    try:
-        run_bot_loop()
-    except KeyboardInterrupt:
-        print("\nStopping TG-System-Control...")
-    finally:
-        system_lifecycle.notify_offline("Agent stopped by user")
+    # 3. Start auto-restarting supervisor loop
+    while True:
+        try:
+            run_bot_loop()
+        except KeyboardInterrupt:
+            print("\nStopping TG-System-Control...")
+            system_lifecycle.notify_offline("Agent stopped by user")
+            break
+        except Exception as e:
+            print(f"[Main Supervisor] Daemon encountered error: {e}. Auto-recovering in 3s...")
+            time.sleep(3)
 
 
 if __name__ == "__main__":

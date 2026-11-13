@@ -81,14 +81,21 @@ def run_bot_loop():
 
                     print(f"📩 [{sender_name}] {user_text}")
 
-                    # Process via Hermes Agent
-                    result = agent.process_message(user_text)
+                    # Process via Hermes Agent safely
+                    try:
+                        result = agent.process_message(user_text)
 
-                    # Send photo if returned
-                    if result.get("photo"):
-                        telegram_client.send_photo(chat_id, result["photo"], caption=result.get("text", ""))
-                    elif result.get("text"):
-                        telegram_client.send_message(chat_id, result["text"])
+                        # Send photo if returned
+                        if result.get("photo"):
+                            telegram_client.send_photo(chat_id, result["photo"], caption=result.get("text", ""))
+                        elif result.get("text"):
+                            telegram_client.send_message(chat_id, result["text"])
+                    except Exception as err:
+                        print(f"[Listener] Error handling '{user_text}': {err}")
+                        try:
+                            telegram_client.send_message(chat_id, f"⚠️ Error executing command: `{err}`")
+                        except Exception:
+                            pass
 
                 # 2. Handle inline button callback queries
                 cq = update.get("callback_query")

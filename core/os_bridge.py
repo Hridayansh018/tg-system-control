@@ -160,10 +160,15 @@ def launch_app(app_name: str) -> dict:
                 break
 
     if target_url:
-        # Determine preferred browser
-        browser = "msedge" if "edge" in app_lower else ("chrome" if "chrome" in app_lower else "msedge" if IS_WINDOWS else "safari")
+        is_app_mode = any(w in app_lower for w in ["app", "gui", "standalone", "pwa"])
         if IS_WINDOWS:
-            return run_command(f'start {browser} "{target_url}"')
+            browser = "chrome" if "chrome" in app_lower else "msedge"
+            if is_app_mode:
+                # Launch as standalone dedicated GUI window (no browser tabs/address bar)
+                ps_cmd = f'Start-Process {browser} -ArgumentList "--app={target_url}"; Start-Sleep -Milliseconds 700; $ws = New-Object -ComObject WScript.Shell; $ws.AppActivate("{site_key if site_key else "Edge"}")'
+            else:
+                ps_cmd = f'Start-Process {browser} -ArgumentList "{target_url}"; Start-Sleep -Milliseconds 700; $ws = New-Object -ComObject WScript.Shell; $ws.AppActivate("Edge")'
+            return run_command(ps_cmd)
         elif IS_MAC:
             app_flag = "-a 'Google Chrome'" if "chrome" in app_lower else ("-a 'Microsoft Edge'" if "edge" in app_lower else "")
             return run_command(f'open {app_flag} "{target_url}"')
