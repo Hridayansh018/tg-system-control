@@ -173,3 +173,166 @@ def list_top_processes(limit: int = 10) -> str:
         res = run_command(cmd)
         return res["stdout"] if res["exit_code"] == 0 else res["stderr"]
     return "Unsupported platform"
+
+
+# ----------------------------------------------------------------------
+# GUI AUTOMATION: Mouse Movement, Clicks, Keystrokes & Hotkeys
+# ----------------------------------------------------------------------
+
+def mouse_move(x: int, y: int) -> bool:
+    """Moves the mouse cursor to screen coordinates (x, y)."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            if ctypes.windll.user32.SetCursorPos(int(x), int(y)):
+                return True
+        except Exception:
+            pass
+        ps = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({int(x)}, {int(y)})"
+        res = run_command(ps, timeout=5)
+        return res["exit_code"] == 0
+    elif IS_MAC:
+        res = run_command(f"osascript -e 'tell application \"System Events\" to set the position of the mouse cursor to {{{int(x)}, {int(y)}}}'")
+        return res["exit_code"] == 0
+    return False
+
+
+def mouse_click(x: int = None, y: int = None, button: str = "left", double: bool = False) -> bool:
+    """Clicks at coordinates (x, y) or current cursor position."""
+    if x is not None and y is not None:
+        mouse_move(x, y)
+        time.sleep(0.05)
+
+    btn = button.lower()
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            # Left down/up: 0x02, 0x04 | Right down/up: 0x08, 0x10
+            down = 0x0008 if btn == "right" else 0x0002
+            up = 0x0010 if btn == "right" else 0x0004
+            ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
+            ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
+            if double:
+                time.sleep(0.1)
+                ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
+                ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
+            return True
+        except Exception:
+            pass
+
+    elif IS_MAC:
+        click_type = "double click" if double else "click"
+        res = run_command(f"osascript -e 'tell application \"System Events\" to {click_type}'")
+        return res["exit_code"] == 0
+
+    return False
+
+
+def type_text(text: str) -> bool:
+    """Types plain text into the currently focused window."""
+    if IS_WINDOWS:
+        # Escape characters that SendKeys treats as modifiers: + ^ % ~ ( ) { } [ ]
+        safe_text = ""
+        for ch in text:
+            if ch in "+^%~(){}[]":
+                safe_text += f"{{{ch}}}"
+            else:
+                safe_text += ch
+
+        ps = f"""
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait(@'
+{safe_text}
+'@)
+"""
+        res = run_command(ps, timeout=10)
+        return res["exit_code"] == 0
+
+    elif IS_MAC:
+        escaped = text.replace('\\', '\\\\').replace('"', '\\"')
+        res = run_command(f'osascript -e \'tell application "System Events" to keystroke "{escaped}"\'')
+        return res["exit_code"] == 0
+
+    return False
+
+
+def press_key(key_name: str) -> bool:
+    """Presses a single special key (enter, tab, esc, space, backspace, up, down, left, right)."""
+    k = key_name.lower().strip()
+    if IS_WINDOWS:
+        key_map = {
+            "enter": "{ENTER}",
+            "return": "{ENTER}",
+            "tab": "{TAB}",
+            "esc": "{ESC}",
+            "escape": "{ESC}",
+            "space": " ",
+            "backspace": "{BS}",
+            "bs": "{BS}",
+            "up": "{UP}",
+            "down": "{DOWN}",
+            "left": "{LEFT}",
+            "right": "{RIGHT}",
+            "delete": "{DEL}",
+            "del": "{DEL}",
+        }
+        send_code = key_map.get(k, f"{{{k.upper()}}}")
+        ps = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{send_code}')"
+        res = run_command(ps, timeout=5)
+        return res["exit_code"] == 0
+
+    elif IS_MAC:
+        mac_key_map = {
+            "enter": "key code 36",
+            "return": "key code 36",
+            "tab": "key code 48",
+            "esc": "key code 53",
+            "space": "key code 49",
+            "backspace": "key code 51",
+            "up": "key code 126",
+            "down": "key code 125",
+            "left": "key code 123",
+            "right": "key code 124",
+        }
+        action = mac_key_map.get(k, f'keystroke "{k}"')
+        res = run_command(f"osascript -e 'tell application \"System Events\" to {action}'")
+        return res["exit_code"] == 0
+
+    return False
+
+
+def press_hotkey(hotkey_str: str) -> bool:
+    """Presses a hotkey combination (e.g. 'ctrl+c', 'ctrl+v', 'alt+tab', 'ctrl+a', 'win+d')."""
+    hk = hotkey_str.lower().strip().replace(" ", "")
+    if IS_WINDOWS:
+        # SendKeys representation: ^ = Ctrl, % = Alt, + = Shift
+        hotkey_map = {
+            "ctrl+c": "^c",
+            "ctrl+v": "^v",
+            "ctrl+x": "^x",
+            "ctrl+a": "^a",
+            "ctrl+s": "^s",
+            "ctrl+z": "^z",
+            "alt+tab": "%{TAB}",
+            "alt+f4": "%{F4}",
+            "enter": "{ENTER}",
+        }
+        if hk in hotkey_map:
+            code = hotkey_map[hk]
+            ps = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{code}')"
+            res = run_command(ps, timeout=5)
+            return res["exit_code"] == 0
+        elif hk in ["win+d", "win+m"]:
+            ps = "(New-Object -ComObject Shell.Application).MinimizeAll()"
+            res = run_command(ps, timeout=5)
+            return res["exit_code"] == 0
+
+    elif IS_MAC:
+        if hk in ["cmd+c", "ctrl+c"]:
+            return run_command("osascript -e 'tell application \"System Events\" to keystroke \"c\" using command down'")["exit_code"] == 0
+        elif hk in ["cmd+v", "ctrl+v"]:
+            return run_command("osascript -e 'tell application \"System Events\" to keystroke \"v\" using command down'")["exit_code"] == 0
+        elif hk in ["cmd+a", "ctrl+a"]:
+            return run_command("osascript -e 'tell application \"System Events\" to keystroke \"a\" using command down'")["exit_code"] == 0
+
+    return False

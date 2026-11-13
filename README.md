@@ -8,10 +8,10 @@ Remotely monitor your machine, run terminal commands, capture live desktop scree
 
 ## 💡 Quick Setup Prompt for AI Agents (Antigravity, Claude, Cursor)
 
-Copy and paste this prompt to your AI coding agent to setup this repository instantly on any computer:
+Copy and paste this prompt to your AI coding agent to set up this repository effortlessly on any computer:
 
 ```text
-Read the file SETUP.md and setup this project for my pc and it will be powered by <"antigravity/gemini/claude/openrouter - specify model">
+Please read the SETUP.md file, set up this project on my computer, and configure the AI engine to be powered by <"specify model: e.g., gemini / claude / openrouter / offline">.
 ```
 
 The agent will read [SETUP.md](file:///D:/git-data/tg-system-control/SETUP.md), detect your OS, install dependencies, configure environment variables, and run `python setup_check.py` to certify readiness.

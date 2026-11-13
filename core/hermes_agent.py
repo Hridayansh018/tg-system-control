@@ -29,6 +29,11 @@ Available Tools:
 4. `launch_app`: Opens an application. Parameters: `{"app_name": "string"}` (e.g. "chrome", "edge", "notepad", "calc").
 5. `list_processes`: Lists top running processes by CPU. Parameters: `{"limit": 10}`.
 6. `lock_pc`: Locks the workstation screen. No parameters required.
+7. `mouse_click`: Clicks the mouse at screen coordinates (x, y) or current position. Parameters: `{"x": int, "y": int, "button": "left"|"right", "double": bool}`.
+8. `mouse_move`: Moves mouse cursor to (x, y). Parameters: `{"x": int, "y": int}`.
+9. `type_text`: Types plain text into the active focused window. Parameters: `{"text": "string"}`.
+10. `press_key`: Presses a special key. Parameters: `{"key": "enter"|"tab"|"esc"|"space"|"backspace"}`.
+11. `press_hotkey`: Presses a hotkey combination. Parameters: `{"hotkey": "ctrl+c"|"ctrl+v"|"alt+tab"|"win+d"}`.
 
 If the user asks a normal question that requires no tool execution, just reply with helpful text normally.
 Be concise, helpful, and speak in Hinglish/English as the user prefers.
@@ -141,6 +146,36 @@ class HermesAgent:
             else:
                 return {"text": f"⚠️ Could not launch *{app}*: {res['stderr']}", "photo": None}
 
+        # 7. GUI: Mouse Click (/click X Y or click X Y)
+        if re.match(r"^(/click|click)\s+\d+\s+\d+", user_lower):
+            m = re.findall(r"\d+", user_text)
+            if len(m) >= 2:
+                x, y = int(m[0]), int(m[1])
+                ok = os_bridge.mouse_click(x, y)
+                memory_logger.log_entry("GUI_MOUSE_CLICK", f"Clicked at ({x}, {y})", details={"x": x, "y": y, "success": ok})
+                return {"text": f"🖱️ Clicked at *({x}, {y})*", "photo": None}
+
+        # 8. GUI: Type Text (/type text or type: text)
+        if user_text.startswith(("/type ", "type: ", "write: ")):
+            txt = re.sub(r"^(/type |type: |write: )", "", user_text)
+            ok = os_bridge.type_text(txt)
+            memory_logger.log_entry("GUI_KEYBOARD_TYPE", f"Typed text ({len(txt)} chars)", details={"preview": txt[:100], "success": ok})
+            return {"text": f"⌨️ Typed: `{txt[:100]}`", "photo": None}
+
+        # 9. GUI: Press Key (/key enter or key: esc)
+        if user_text.startswith(("/key ", "key: ")):
+            k = re.sub(r"^(/key |key: )", "", user_text).strip()
+            ok = os_bridge.press_key(k)
+            memory_logger.log_entry("GUI_KEY_PRESS", f"Pressed key: {k}", details={"key": k, "success": ok})
+            return {"text": f"🔘 Pressed key *{k.upper()}*", "photo": None}
+
+        # 10. GUI: Hotkey (/hotkey ctrl+v or hotkey: alt+tab)
+        if user_text.startswith(("/hotkey ", "hotkey: ")):
+            hk = re.sub(r"^(/hotkey |hotkey: )", "", user_text).strip()
+            ok = os_bridge.press_hotkey(hk)
+            memory_logger.log_entry("GUI_HOTKEY", f"Pressed hotkey: {hk}", details={"hotkey": hk, "success": ok})
+            return {"text": f"⚡ Pressed hotkey *{hk.upper()}*", "photo": None}
+
         # -------------------------------------------------------------
         # LLM Router Path (Gemini / Hermes 3 / Groq)
         # -------------------------------------------------------------
@@ -202,6 +237,29 @@ class HermesAgent:
                 elif act == "lock_pc":
                     os_bridge.lock_workstation()
                     return {"text": "🔒 *Workstation Locked!*", "photo": None}
+
+                elif act == "mouse_click":
+                    x = params.get("x")
+                    y = params.get("y")
+                    btn = params.get("button", "left")
+                    dbl = params.get("double", False)
+                    os_bridge.mouse_click(x, y, btn, dbl)
+                    return {"text": f"🖱️ Clicked at ({x}, {y})", "photo": None}
+
+                elif act == "type_text":
+                    txt = params.get("text", "")
+                    os_bridge.type_text(txt)
+                    return {"text": f"⌨️ Typed: `{txt}`", "photo": None}
+
+                elif act == "press_key":
+                    k = params.get("key", "enter")
+                    os_bridge.press_key(k)
+                    return {"text": f"🔘 Pressed key *{k.upper()}*", "photo": None}
+
+                elif act == "press_hotkey":
+                    hk = params.get("hotkey", "")
+                    os_bridge.press_hotkey(hk)
+                    return {"text": f"⚡ Pressed hotkey *{hk.upper()}*", "photo": None}
 
             except Exception:
                 pass

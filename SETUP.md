@@ -6,8 +6,10 @@ This document provides step-by-step instructions for humans and AI agents (Antig
 
 ## 📌 For AI Agents (Quick Automation Instruction)
 
-If you are an AI agent asked to setup this project:
-1. Detect the host OS (`Windows`, `Darwin`/`macOS`, or `Linux`).
+If you are an AI agent asked to set up this project:
+```text
+Please read the SETUP.md file, set up this project on my computer, and configure the AI engine to be powered by <"specify model: e.g., gemini / claude / openrouter / offline">.
+```
 2. Verify Python version is `>= 3.10`.
 3. Create a virtual environment (`python -m venv .venv`).
 4. Install minimal dependencies (`pip install requests Pillow`).
