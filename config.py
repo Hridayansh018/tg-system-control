@@ -81,6 +81,7 @@ AGENT_MODEL = _get("AGENT_MODEL")  # optional override, tried before the built-i
 AGENT_MAX_STEPS = max(1, _get_int("AGENT_MAX_STEPS", 30))
 AGENT_REQUIRE_APPROVAL = _get_bool("AGENT_REQUIRE_APPROVAL", True)
 APPROVAL_TIMEOUT_SEC = max(30, _get_int("APPROVAL_TIMEOUT_SEC", 300))
+REMOTE_FEEDBACK = _get_bool("REMOTE_FEEDBACK", True)  # screenshot after mouse/keyboard commands
 INBOX_DIR = Path(os.path.expandvars(os.path.expanduser(
     _get("INBOX_DIR", str(Path.home() / "Downloads" / "TelegramInbox"))
 )))

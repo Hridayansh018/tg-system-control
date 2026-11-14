@@ -46,6 +46,9 @@ For normal messages the AI is **only a translator**: it answers with commands fr
 ## ✨ What's new (v2.0)
 
 - **🧠 Automate anything — `/agent <task>`.** The AI watches the screen and clicks/types/opens/scrolls step by step, sends progress and screenshots, asks you questions when it needs something, and shows ✅/❌ approval cards before risky steps. `/stop` cancels instantly, `/task` shows progress.
+- **🖥️ Remote-desktop controls.** `/grid` shows the screen with an x/y ruler and the mouse marked; then `click X Y`, `rclick`, `dclick`, `move`, `drag`, `scroll` — and a fresh screenshot comes back after every mouse/keyboard command, so you can drive the PC step by step like a remote desktop.
+- **📤 Upload files into websites.** Send a file to the bot, click the site's *Upload* button, then `/uploadfile <name>` fills the Windows file picker (the agent can do this too).
+- **🔒 Block the PC's own mouse/keyboard** with `/block 10` / `/unblock` (admin mode), and reliable typing: waits for the window to be ready, never types into the wrong window.
 - **📥 Files both ways.** Send a photo or file to the bot → saved on the PC; `/get <path>`, `/sendfile`, `/latest` send files to your phone.
 - **🎛️ More controls:** `/clip`, `/volume`, `/media`, `/scroll`, `/windows`, `/sleep`, `/restart`, `/shutdown` (with approval).
 - **Hinglish / free text → real commands.** "spotify kholo aur edge band karo" runs `open spotify` then `close edge`, and the bot tells you *"Understood as: …"*. Feedback or questions get a reply and **nothing is executed**.
@@ -127,6 +130,16 @@ Every line should be `✅ PASS`. It checks Python, packages, `.env` (placeholder
 
 When everything is warmed up you get **🟢 SYSTEM ONLINE** in Telegram. Send `/help`.
 
+### 🛡️ Run as administrator (recommended)
+
+Windows only lets programs running **as administrator**:
+- block the PC's own mouse/keyboard (`/block`, and while the bot clicks/types), and
+- click/type into admin windows (Task Manager, admin terminals, installers, UAC-elevated apps).
+
+Run **`install_autostart_admin.bat`** once and click **Yes** on the Windows prompt. It registers a scheduled task that starts the bot at every logon with admin rights (no prompt at boot), removes the normal Startup shortcut, and restarts the bot as admin. Start it manually any time with `schtasks /Run /TN TGSystemControl`; remove it with `uninstall_autostart.bat`. `setup_check.py` and the 🟢 ONLINE message show whether the input lock is available.
+
+What admin mode can't do: control the Windows lock screen, the UAC "Yes/No" secure desktop, or Ctrl+Alt+Del screens (Windows blocks all programs there; Ctrl+Alt+Del at the PC also always cancels `/block`).
+
 ### Updating to a new version
 ```bash
 git pull
@@ -169,7 +182,11 @@ Exact commands run instantly and work offline. Anything else is translated by th
 | Type + Enter | `/prompt what is 2+2`, `prompt: …` |
 | Keys | `press enter`, `/key esc`, `/key f5` |
 | Hotkeys | `/hotkey ctrl+w`, `/hotkey ctrl+shift+t`, `/hotkey alt+tab`, `/hotkey win+d` |
-| Mouse click | `click 960 540`, `/click 100 200` |
+| **Remote desktop** | `/grid` (screenshot with x/y ruler, 🔴 = mouse) · `/shot` · `/where` (mouse position) |
+| Mouse | `click 960 540`, `rclick X Y`, `dclick X Y`, `click` (at current position), `move X Y`, `drag X1 Y1 X2 Y2`, `scroll down 5`, `scroll up` |
+| Remote view | after every mouse/keyboard command a screenshot is sent back; `/remote off` / `/remote on` |
+| Upload into a website | send the file to the bot → click the site's *Upload / Choose file* button → `/uploadfile photo.png` |
+| Block local input | `/block 10` (minutes) · `/unblock` — needs [admin mode](#-run-as-administrator-recommended) |
 | Focus a window | `/focus chatgpt`, `/focus notepad` |
 | ChatGPT | `/chatgpt write 3 youtube title ideas about Luffy` (opens Edge → new chat → paste → Enter → screenshot) |
 | Send files to phone | `/latest` (newest file in Downloads), `/sendfile report.pdf`, `send file C:\path\to\file.zip` |
@@ -258,7 +275,11 @@ Windows is the main, tested platform. macOS and Linux code paths are written but
 - **Black or empty screenshots** — the PC is locked or the bot runs in a non-interactive session (e.g. a service). Start it from your logged-in desktop (autostart does this).
 - **"App not found"** — try the name shown in the Start menu (`open visual studio code`), or `/exec Start-Process "path\to\app.exe"`. The app list refreshes automatically once per run when a name isn't found.
 - **AI translator errors / quota** — free Gemini keys have daily limits. Exact commands keep working; try again later or switch `LLM_PROVIDER`.
-- **"Your mouse/keyboard were not locked"** — normal unless the bot runs as administrator (Windows `BlockInput` rule).
+- **"Your mouse/keyboard were not locked" / `/block` says it needs admin** — run `install_autostart_admin.bat` (see *Run as administrator*).
+- **Typing went into the wrong place or stopped** — the bot waits for the window to be ready and stops if another window takes focus. Click the text box first (`/grid` → `click X Y`) and send the text again.
+- **Clicks/typing do nothing in Task Manager or an admin window** — Windows blocks non-admin programs from controlling admin windows; use admin mode.
+- **`/uploadfile` says no file picker is open** — click the website's *Upload / Choose file / Attach* button first (the Windows *Open* dialog must be visible), then send `/uploadfile` again.
+- **Clicked the wrong spot** — coordinates are real screen pixels. Use `/grid` (labels `x…`/`y…`) and check the 🔴 marker on the screenshot that comes back.
 - **No OFFLINE message after shutdown** — it's best-effort: if Windows cuts the network first, the message can't be sent.
 - **`stop_agent.bat` says force-stopped** — the bot didn't exit in 10 s (or was an old v1 instance), so no OFFLINE message was sent.
 - **Agent mode is OFF at startup** — set `GEMINI_API_KEY` and `AGENT_ENABLED=true`, then restart. `setup_check.py` shows its status.
@@ -291,6 +312,7 @@ tg-system-control/
 │   └── memory_logger.py      # Append-only memory.md log
 ├── start_agent.bat / start_agent_silent.vbs / stop_agent.bat
 ├── install_autostart.bat / uninstall_autostart.bat
+├── install_autostart_admin.bat (+ .ps1)  # Start at logon as administrator (scheduled task)
 ├── install_autostart_mac.sh / install_autostart_linux.sh
 ├── install_hermes_app.bat    # Optional: Nous Research Hermes desktop app
 └── temp/, screenshots/, memory.md   # local only, git-ignored
@@ -307,6 +329,12 @@ Issues and pull requests are welcome. Please run `python setup_check.py` before 
 ---
 
 ## 📝 Changelog
+
+### v2.1
+- Remote-desktop controls: `/grid`, cursor-marked screenshots after every mouse/keyboard command (`/remote on|off`), `rclick`, `dclick`, `move`, `drag`, `scroll down N`, `/where`.
+- Upload into websites: `/uploadfile <name>` fills the Windows file picker; agent action `upload_file`; the agent knows the files you sent.
+- Input blocking fixed (all `BlockInput` calls on one thread so `/stop`, `/unblock` and timers can release it); `/block N` / `/unblock`; `install_autostart_admin.bat` runs the bot as administrator.
+- Typing fixed: no more lost/garbled characters (waits until the window is ready, no Alt-tap when focusing windows, stops if focus changes); opening an app waits for its window; `/prompt` never presses Enter if typing failed.
 
 ### v2.0
 - **Agent mode** (`/agent`, `/do`): Gemini-vision computer-use loop with validated actions, coordinate scaling for high-DPI and multi-monitor, approval cards, never-type rules, ask-the-user, `/stop`, `/task`, task queue, progress edits and screenshots.

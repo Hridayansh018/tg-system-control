@@ -33,7 +33,7 @@ ACTIONS = {
     "click", "double_click", "right_click", "move", "drag", "scroll", "type_text", "press_key", "hotkey",
     "open_app", "close_app", "focus_window", "open_url", "run_shell", "read_file", "list_dir", "wait",
     "clipboard_get", "clipboard_set", "volume", "media", "send_screenshot", "send_file_to_user",
-    "done", "fail", "ask_user",
+    "upload_file", "done", "fail", "ask_user",
 }
 
 ACTION_SCHEMA = {
@@ -74,6 +74,9 @@ Actions and fields:
 - volume: key = up|down|mute ; media: key = play|next|prev
 - send_screenshot: send the current screen to the user (text = caption)
 - send_file_to_user: path (send a file from the PC to the user's phone)
+- upload_file: path. To upload a file to a website/app: FIRST click its Upload / Choose file / attach
+  button so the Windows "Open" file picker appears, THEN use upload_file with the full path.
+  Files the user sent from their phone are in: {inbox}
 - ask_user: question (when you need information or the user must act, e.g. log in)
 - done: summary (task finished - say what you did and the result)
 - fail: summary (explain why it cannot be done)
@@ -194,7 +197,7 @@ def validate_action(data, frame_w: int, frame_h: int) -> dict:
         need("url")
     elif act == "run_shell":
         need("command")
-    elif act in ("read_file", "list_dir", "send_file_to_user"):
+    elif act in ("read_file", "list_dir", "send_file_to_user", "upload_file"):
         need("path")
     elif act == "wait":
         try:
@@ -251,10 +254,13 @@ class GeminiBrain(Brain):
     def next_action(self, task, frame, history, windows):
         os_name = "Windows" if os_bridge.IS_WINDOWS else ("macOS" if os_bridge.IS_MAC else "Linux")
         system = SYSTEM_PROMPT.format(os_name=os_name, w=frame.width, h=frame.height,
-                                      shell="PowerShell" if os_bridge.IS_WINDOWS else "bash")
+                                      shell="PowerShell" if os_bridge.IS_WINDOWS else "bash",
+                                      inbox=str(config.INBOX_DIR))
+        inbox = recent_inbox_files()
         prompt = (
             f"TASK: {task}\n\n"
             f"OPEN WINDOWS: {', '.join(windows[:25]) or 'unknown'}\n\n"
+            + (f"FILES RECENTLY SENT BY THE USER (newest first): {', '.join(inbox)}\n\n" if inbox else "") +
             f"PREVIOUS STEPS (oldest first):\n" + ("\n".join(history[-15:]) or "(none yet)") +
             "\n\nWhat is the single next action?"
         )
@@ -264,6 +270,15 @@ class GeminiBrain(Brain):
         if "error" in res:
             raise AgentError(f"Gemini: {res['error']}")
         return llm_router.extract_json(res["reply"])
+
+
+def recent_inbox_files(limit: int = 8) -> List[str]:
+    try:
+        files = [f for f in config.INBOX_DIR.iterdir() if f.is_file()]
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        return [str(f) for f in files[:limit]]
+    except Exception:
+        return []
 
 
 def default_brain() -> Optional[Brain]:
@@ -558,6 +573,9 @@ class ComputerAgent:
                 self.ui.send_photo(str(p), a.get("text", "") or f"📸 Task #{task.id}")
                 return "sent"
             return "screenshot failed"
+        if act == "upload_file":
+            r = os_bridge.upload_file_dialog(a["path"])
+            return r["stdout"] or r["stderr"]
         if act == "send_file_to_user":
             p = Path(a["path"]).expanduser()
             if not p.is_file():

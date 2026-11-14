@@ -31,7 +31,7 @@ OFFSET_FILE = config.TEMP_DIR / ".last_update_id"
 
 # Commands that are safe to run while the agent is using the mouse/keyboard.
 READ_ONLY_COMMANDS = {"status", "screenshot", "processes", "help", "windows", "clipboard_get", "send_file",
-                      "send_latest_download", "agent"}
+                      "send_latest_download", "agent", "grid", "where", "unblock", "remote"}
 
 
 def load_last_offset() -> int:
@@ -276,7 +276,12 @@ class Listener:
             telegram_client.send_message(chat_id, f"⚠️ Upload failed: `{e}`")
             return
         memory_logger.log_entry("UPLOAD", f"Saved {dest.name}", details={"path": str(dest), "bytes": dest.stat().st_size})
-        telegram_client.send_message(chat_id, f"📥 Saved to `{dest}`")
+        telegram_client.send_message(
+            chat_id,
+            f"📥 Saved to `{dest}`\n\n"
+            f"To upload it to a website: open the site's *Upload / Choose file* button "
+            f"(e.g. `click X Y`, see `/grid`), then send `/uploadfile {dest.name}`.\n"
+            f"Or let the agent do it: `/agent upload {dest.name} to <site>`")
         caption = (msg.get("caption") or "").strip()
         if caption:
             self.handle_text(chat_id, "caption", caption.replace("{file}", str(dest)))

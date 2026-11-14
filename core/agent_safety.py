@@ -130,7 +130,7 @@ def approval_reason(action: dict) -> Optional[str]:
         return "Closing an app can lose unsaved work"
     if act == "hotkey" and action.get("key", "").lower().replace(" ", "") in {"alt+f4", "ctrl+shift+delete", "ctrl+alt+delete"}:
         return "This shortcut can close windows or lose work"
-    if act in ("send_file_to_user", "read_file", "list_dir"):
+    if act in ("send_file_to_user", "read_file", "list_dir", "upload_file"):
         return path_needs_approval(action.get("path", ""))
     if act in ("click", "double_click", "press_key", "type_text"):
         text = " ".join(str(action.get(k, "")) for k in ("thought", "text", "key"))

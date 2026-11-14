@@ -428,7 +428,22 @@ def open_url(url: str) -> dict:
     return _open_url(url)
 
 
-def launch_app(app_name: str) -> dict:
+def launch_app(app_name: str, wait: bool = True) -> dict:
+    """Launches an app or website and (on Windows) waits until its window is up and ready,
+    so a following "type ..." goes into the new window instead of the old one."""
+    if not (IS_WINDOWS and wait):
+        return _launch_app(app_name)
+    try:
+        before_windows, before_fg = _visible_window_handles(), _foreground_hwnd()
+    except Exception:
+        return _launch_app(app_name)
+    res = _launch_app(app_name)
+    if res["exit_code"] == 0 and not wait_for_new_window(before_windows, before_fg):
+        res["stdout"] += " (no new window appeared yet - it may still be loading)"
+    return res
+
+
+def _launch_app(app_name: str) -> dict:
     """Launches an application or website on the user's interactive desktop.
 
     Order: explicit URL -> exact installed app name -> website shortcut (whole words)
@@ -730,15 +745,82 @@ _LOCK_DEPTH = 0
 _LOCK_ACTIVE = False
 
 
+class _InputBlocker:
+    """Owns every BlockInput call on ONE long-lived thread.
+
+    Windows only lets the thread that blocked input unblock it (and unblocks automatically if
+    that thread ends), so /stop, timers and the agent all go through this thread.
+    Ctrl+Alt+Del always unblocks input (Windows safety rule).
+    """
+
+    def __init__(self):
+        import queue as _queue
+        self._q = _queue.Queue()
+        self._thread = None
+
+    def _run(self):
+        import ctypes
+        while True:
+            want, done, box = self._q.get()
+            try:
+                box.append(bool(ctypes.windll.user32.BlockInput(bool(want))))
+            except Exception as e:
+                print(f"[GUI] BlockInput error: {e}")
+                box.append(False)
+            done.set()
+
+    def set(self, blocked: bool) -> bool:
+        if not IS_WINDOWS:
+            return False
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._run, name="input-blocker", daemon=True)
+            self._thread.start()
+        done, box = threading.Event(), []
+        self._q.put((blocked, done, box))
+        done.wait(5)
+        return bool(box and box[0])
+
+
+_BLOCKER = _InputBlocker()
+_LONG_BLOCK = {"until": 0.0, "timer": None}
+
+
 def set_user_input_blocked(blocked: bool) -> bool:
     """Blocks or unblocks physical mouse/keyboard on Windows (needs admin rights to block)."""
-    if IS_WINDOWS:
-        try:
-            import ctypes
-            return bool(ctypes.windll.user32.BlockInput(bool(blocked)))
-        except Exception as e:
-            print(f"[GUI] BlockInput error: {e}")
-    return False
+    return _BLOCKER.set(blocked)
+
+
+def long_block_active() -> bool:
+    return _LONG_BLOCK["until"] > time.time()
+
+
+def block_input_for(minutes: float) -> dict:
+    """Blocks the local mouse/keyboard for N minutes (remote use only). Needs admin.
+    Unblocks automatically, with /unblock, or with Ctrl+Alt+Del at the PC."""
+    if not IS_WINDOWS:
+        return _err("Input blocking is only available on Windows.")
+    if not input_lock_available():
+        return _err("Blocking the local mouse/keyboard needs the bot to run as administrator. "
+                    "Run install_autostart_admin.bat once (see README → Run as administrator).")
+    minutes = max(0.5, min(float(minutes), 120.0))
+    if not set_user_input_blocked(True):
+        return _err("Windows refused to block input.")
+    if _LONG_BLOCK["timer"]:
+        _LONG_BLOCK["timer"].cancel()
+    _LONG_BLOCK["until"] = time.time() + minutes * 60
+    t = threading.Timer(minutes * 60, unblock_input)
+    t.daemon = True
+    t.start()
+    _LONG_BLOCK["timer"] = t
+    return _ok(f"Local mouse & keyboard blocked for {minutes:g} min (Ctrl+Alt+Del at the PC always unblocks).")
+
+
+def unblock_input() -> dict:
+    if _LONG_BLOCK["timer"]:
+        _LONG_BLOCK["timer"].cancel()
+    _LONG_BLOCK.update(until=0.0, timer=None)
+    release_input_lock()
+    return _ok("Local mouse & keyboard unblocked.")
 
 
 class UserInputLock:
@@ -754,8 +836,11 @@ class UserInputLock:
     def __enter__(self):
         global _LOCK_DEPTH, _LOCK_ACTIVE
         with _LOCK_STATE:
+            if long_block_active():
+                self.locked = True  # a /block is already holding the input
+                return self
             if _LOCK_DEPTH == 0:
-                _LOCK_ACTIVE = set_user_input_blocked(True)
+                _LOCK_ACTIVE = set_user_input_blocked(True) if input_lock_available() else False
             _LOCK_DEPTH += 1
             self.locked = _LOCK_ACTIVE
         return self
@@ -763,6 +848,8 @@ class UserInputLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         global _LOCK_DEPTH, _LOCK_ACTIVE
         with _LOCK_STATE:
+            if long_block_active():
+                return
             _LOCK_DEPTH = max(0, _LOCK_DEPTH - 1)
             if _LOCK_DEPTH == 0 and _LOCK_ACTIVE:
                 set_user_input_blocked(False)
@@ -770,12 +857,13 @@ class UserInputLock:
 
 
 def release_input_lock():
-    """Emergency unlock (used by /stop and on errors)."""
+    """Emergency unlock (used by /stop and on errors). Keeps an explicit /block in place."""
     global _LOCK_DEPTH, _LOCK_ACTIVE
     with _LOCK_STATE:
         _LOCK_DEPTH = 0
         _LOCK_ACTIVE = False
-    set_user_input_blocked(False)
+    if not long_block_active():
+        set_user_input_blocked(False)
 
 
 def input_lock_available() -> bool:
@@ -1015,8 +1103,12 @@ def _send_unicode_text(text: str) -> bool:
     send_input = ctypes.windll.user32.SendInput
     send_input.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
     KEYEVENTF_UNICODE, KEYEVENTF_KEYUP = 0x0004, 0x0002
+    target = ctypes.windll.user32.GetForegroundWindow()
 
-    for ch in text:
+    for i, ch in enumerate(text):
+        if i % 8 == 0 and ctypes.windll.user32.GetForegroundWindow() != target:
+            print(f"[GUI] Focus changed after {i} characters - stopped typing")
+            return False
         if ch == "\n":
             press_key("enter")
             continue
@@ -1028,16 +1120,88 @@ def _send_unicode_text(text: str) -> bool:
                 arr[idx].type = 1  # INPUT_KEYBOARD
                 arr[idx].u.ki = KEYBDINPUT(0, unit, flags, 0, 0)
             send_input(2, arr, ctypes.sizeof(INPUT))
-        time.sleep(0.004)
+            time.sleep(0.003)
+        time.sleep(0.008)
     return True
 
 
+def wait_foreground_ready(timeout: float = 4.0) -> bool:
+    """Waits until the foreground window has finished starting up and stops changing.
+
+    Typing into a window that is still loading (e.g. right after "open notepad") drops
+    or garbles keys, so callers wait for: the process to be idle for input, and the same
+    foreground window + title for ~0.4 s.
+    """
+    if not IS_WINDOWS:
+        time.sleep(0.3)
+        return True
+    import ctypes
+    from ctypes import wintypes
+    u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    deadline = time.time() + timeout
+
+    def snapshot():
+        hwnd = u32.GetForegroundWindow()
+        n = u32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        u32.GetWindowTextW(hwnd, buf, n + 1)
+        return hwnd, buf.value
+
+    hwnd, _ = snapshot()
+    if hwnd:
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        handle = k32.OpenProcess(0x0400 | 0x1000, False, pid.value)  # QUERY_INFORMATION | QUERY_LIMITED
+        if handle:
+            try:
+                u32.WaitForInputIdle(handle, int(max(0.1, deadline - time.time()) * 1000))
+            finally:
+                k32.CloseHandle(handle)
+    stable_since, last = time.time(), snapshot()
+    while time.time() < deadline:
+        time.sleep(0.1)
+        cur = snapshot()
+        if cur != last:
+            last, stable_since = cur, time.time()
+        elif time.time() - stable_since >= 0.4 and cur[0]:
+            return True
+    return False
+
+
+def _foreground_hwnd():
+    import ctypes
+    return ctypes.windll.user32.GetForegroundWindow()
+
+
+def _visible_window_handles() -> set:
+    return {h for h, _ in list_windows()}
+
+
+def wait_for_new_window(before_windows: set, before_fg, timeout: float = 8.0) -> bool:
+    """After launching something, waits until a new window appears or the foreground changes,
+    then until it is ready for input. Returns False if nothing happened within `timeout`."""
+    if not IS_WINDOWS:
+        time.sleep(1.0)
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        fg = _foreground_hwnd()
+        if (fg and fg != before_fg) or (_visible_window_handles() - before_windows):
+            wait_foreground_ready(timeout=max(0.5, deadline - time.time()))
+            return True
+        time.sleep(0.15)
+    return False
+
+
 def type_text(text: str) -> bool:
-    """Types text into the focused window. Long text is pasted via the clipboard."""
+    """Types text into the focused window (waits for it to be ready first).
+    Stops if another window takes focus while typing, so text never lands in the wrong window.
+    Long text is pasted via the clipboard (the previous clipboard is restored)."""
     if not text:
         return True
     if IS_WINDOWS:
         try:
+            wait_foreground_ready()
             if len(text) > 200:
                 old = get_clipboard()
                 if set_clipboard(text):
@@ -1117,17 +1281,25 @@ def force_foreground(hwnd, maximize: bool = False) -> bool:
     tid_cur = k32.GetCurrentThreadId()
 
     u32.AllowSetForegroundWindow(0x0000FFFF)
-    u32.AttachThreadInput(tid_cur, tid_fore, True)
-    u32.keybd_event(0x12, 0, 0, 0)  # Alt tap unlocks SetForegroundWindow
-    if maximize:
-        u32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
-    elif u32.IsIconic(hwnd):
-        u32.ShowWindow(hwnd, 9)  # SW_RESTORE
-    u32.BringWindowToTop(hwnd)
-    ok = bool(u32.SetForegroundWindow(hwnd))
-    u32.keybd_event(0x12, 0, 2, 0)
-    u32.AttachThreadInput(tid_cur, tid_fore, False)
-    return ok
+    attached = bool(u32.AttachThreadInput(tid_cur, tid_fore, True)) if tid_fore and tid_fore != tid_cur else False
+    try:
+        if maximize:
+            u32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+        elif u32.IsIconic(hwnd):
+            u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        u32.BringWindowToTop(hwnd)
+        u32.SetForegroundWindow(hwnd)
+        if u32.GetForegroundWindow() != hwnd:
+            # Foreground lock: a synthetic key press lets us take focus. F24 is used instead of
+            # Alt because an Alt tap turns on "access key" mode in many apps (Windows 11 Notepad,
+            # Office...), which then swallows the first characters we type.
+            u32.keybd_event(0x87, 0, 0, 0)
+            u32.keybd_event(0x87, 0, 2, 0)
+            u32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            u32.AttachThreadInput(tid_cur, tid_fore, False)
+    return u32.GetForegroundWindow() == hwnd
 
 
 def focus_window(title_query: str) -> bool:
@@ -1137,7 +1309,7 @@ def focus_window(title_query: str) -> bool:
             hwnd = _find_window(title_query)
             if hwnd:
                 force_foreground(hwnd)
-                time.sleep(0.3)
+                wait_foreground_ready(timeout=2.0)
                 return True
         except Exception as e:
             print(f"[GUI] focus_window error: {e}")
@@ -1250,6 +1422,150 @@ def media_key(action: str) -> bool:
                 "stop": "XF86AudioStop"}[key]
         return run_command(f"xdotool key {xkey}")["exit_code"] == 0
     return False
+
+
+# ----------------------------------------------------------------------
+# Remote-desktop helpers: cursor, annotated screenshots, file-picker upload
+# ----------------------------------------------------------------------
+def get_cursor_pos() -> Optional[tuple]:
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            p = wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(p))
+            return p.x, p.y
+        except Exception:
+            return None
+    if IS_LINUX and shutil.which("xdotool"):
+        m = re.search(r"x:(\d+) y:(\d+)", run_command("xdotool getmouselocation")["stdout"])
+        return (int(m.group(1)), int(m.group(2))) if m else None
+    return None
+
+
+def screenshot_annotated(output_path: Path, grid: bool = False, grid_step: int = 100) -> bool:
+    """Screenshot with the mouse cursor marked (red crosshair) and, optionally, a labelled
+    coordinate grid in real screen pixels - so you can pick x/y for /click from your phone."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from PIL import ImageDraw, ImageGrab
+        attach_to_input_desktop()
+        ensure_dpi_aware()
+        left, top, _, _ = get_virtual_screen()
+        try:
+            img = ImageGrab.grab(all_screens=True)
+        except TypeError:
+            img, left, top = ImageGrab.grab(), 0, 0
+        img = img.convert("RGB")
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        if grid:
+            step = max(25, int(grid_step))
+            first_x = ((left + step - 1) // step) * step
+            first_y = ((top + step - 1) // step) * step
+            # x labels along the top and middle rows, y labels along the left and middle columns
+            for sx in range(first_x, left + w, step):
+                x = sx - left
+                major = sx % (step * 5) == 0
+                draw.line([(x, 0), (x, h)], fill=(255, 0, 255) if major else (0, 200, 255), width=1)
+                for ly in (2, h // 2):
+                    draw.rectangle([x + 2, ly, x + 42, ly + 13], fill=(0, 0, 0))
+                    draw.text((x + 4, ly + 1), f"x{sx}", fill=(255, 255, 0))
+            for sy in range(first_y, top + h, step):
+                y = sy - top
+                major = sy % (step * 5) == 0
+                draw.line([(0, y), (w, y)], fill=(255, 0, 255) if major else (0, 200, 255), width=1)
+                for lx in (2, w // 2 + 46):
+                    draw.rectangle([lx, y + 2, lx + 42, y + 15], fill=(0, 0, 0))
+                    draw.text((lx + 2, y + 3), f"y{sy}", fill=(0, 255, 0))
+        pos = get_cursor_pos()
+        if pos:
+            cx, cy = pos[0] - left, pos[1] - top
+            r = 18
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 0, 0), width=3)
+            draw.line([(cx - r - 8, cy), (cx + r + 8, cy)], fill=(255, 0, 0), width=2)
+            draw.line([(cx, cy - r - 8), (cx, cy + r + 8)], fill=(255, 0, 0), width=2)
+            draw.rectangle([cx + r + 4, cy - 9, cx + r + 100, cy + 9], fill=(255, 0, 0))
+            draw.text((cx + r + 8, cy - 7), f"{pos[0]},{pos[1]}", fill=(255, 255, 255))
+        img.save(str(output_path), "JPEG", quality=85)
+        return True
+    except Exception as e:
+        print(f"[GUI] screenshot_annotated error: {e}")
+        return take_screenshot(output_path)
+
+
+_FILE_DIALOG_TITLES = ("open", "file upload", "choose file", "select file", "upload", "browse",
+                       "kholo", "choose files", "select files", "insert", "attach")
+
+
+def _is_file_dialog(hwnd, title: str) -> bool:
+    import ctypes
+    buf = ctypes.create_unicode_buffer(64)
+    ctypes.windll.user32.GetClassNameW(hwnd, buf, 64)
+    t = title.lower()
+    return buf.value == "#32770" and any(k in t for k in _FILE_DIALOG_TITLES)
+
+
+def find_file_dialog():
+    """Returns (hwnd, title) of an open Windows file picker (Open / File Upload), or None."""
+    if not IS_WINDOWS:
+        return None
+    import ctypes
+    fg = ctypes.windll.user32.GetForegroundWindow()
+    windows = list_windows()
+    for hwnd, title in windows:  # prefer the foreground dialog
+        if hwnd == fg and _is_file_dialog(hwnd, title):
+            return hwnd, title
+    for hwnd, title in windows:
+        if _is_file_dialog(hwnd, title):
+            return hwnd, title
+    return None
+
+
+def upload_file_dialog(path: str, wait_sec: float = 8.0) -> dict:
+    """Fills an open browser/app file picker with `path` and confirms it.
+
+    Use after clicking a website's "Upload" / "Choose file" button. Works for the standard
+    Windows Open dialog used by Edge, Chrome, Firefox and most apps.
+    """
+    p = Path(os.path.expandvars(os.path.expanduser(path.strip().strip('"'))))
+    if not p.is_file():
+        found = find_file(path)
+        if not found:
+            return _err(f"File '{path}' not found.")
+        p = found
+    if not IS_WINDOWS:
+        return _err("Filling file pickers is only supported on Windows.")
+    deadline = time.time() + wait_sec
+    dialog = find_file_dialog()
+    while not dialog and time.time() < deadline:
+        time.sleep(0.25)
+        dialog = find_file_dialog()
+    if not dialog:
+        return _err("No file picker is open. Click the website's Upload / Choose file button first.")
+    hwnd, title = dialog
+    force_foreground(hwnd)
+    wait_foreground_ready(timeout=2.0)
+    old_clip = get_clipboard()
+    with UserInputLock("Upload file"):
+        press_hotkey("alt+n")  # focus the "File name" box
+        time.sleep(0.25)
+        set_clipboard(f'"{p}"')
+        time.sleep(0.1)
+        press_hotkey("ctrl+a")
+        press_hotkey("ctrl+v")
+        time.sleep(0.3)
+        press_key("enter")
+    if old_clip is not None:
+        time.sleep(0.3)
+        set_clipboard(old_clip)
+    closed_by = time.time() + 6
+    while time.time() < closed_by:
+        if not any(h == hwnd for h, _ in list_windows()):
+            return _ok(f"Selected {p.name} in the '{title}' dialog.")
+        time.sleep(0.25)
+    return _err(f"Typed the path into '{title}' but the dialog is still open (the site may not accept this file type).")
 
 
 # ----------------------------------------------------------------------

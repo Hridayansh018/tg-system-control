@@ -39,7 +39,14 @@ HELP_TEXT = (
     "• `lock pc` / `/lock` — lock the screen\n"
     "• `/exec <command>` — run a PowerShell/Bash command\n"
     "• `/type <text>` · `/prompt <text>` (type + Enter)\n"
-    "• `/key enter` · `/hotkey ctrl+w` · `/click 500 300`\n"
+    "• `/key enter` · `/hotkey ctrl+w`\n\n"
+    "*🖥️ Remote desktop:*\n"
+    "• `/grid` — screenshot with x/y ruler (🔴 = mouse) · `/shot` · `/where`\n"
+    "• `click 960 540` · `rclick X Y` · `dclick X Y` · `click` (here)\n"
+    "• `move X Y` · `drag X1 Y1 X2 Y2` · `scroll down 5`\n"
+    "• `/uploadfile <name>` — fill an open website file picker (send the file to me first)\n"
+    "• `/block 10` · `/unblock` — lock the PC's own mouse/keyboard (admin mode)\n"
+    "• `/remote off|on` — screenshot after every mouse/keyboard command\n\n"
     "• `/focus <window>` · `/chatgpt <prompt>`\n"
     "• `/sendfile <name>` · `/latest` (newest download)\n\n"
     "*Anything else* (Hinglish or English) is translated into these commands by the AI, "
@@ -86,12 +93,17 @@ RAW_PREFIX_RULES = [
     (r"^/clip\s+(.+)$", "clipboard_set"),
     (r"^/volume\s+(up|down|mute)$", "volume"),
     (r"^/media\s+(play|pause|next|prev|previous|stop)$", "media"),
-    (r"^/scroll\s+(up|down)$", "scroll"),
+    (r"^(?:/uploadfile|/upload|upload file:?)\s+(.+)$", "upload_file"),
+    (r"^/block(?:\s+(\d+(?:\.\d+)?))?\s*(?:m|min|mins|minutes)?$", "block"),
+    (r"^/remote\s+(on|off)$", "remote"),
 ]
 
 # (fullmatch regex on the normalised text, command, arg-or-None-for-group-1)
 PHRASE_RULES = [
     (r"/help|/start|help|commands|menu", "help", ""),
+    (r"/grid|grid|screen grid|grid dikhao", "grid", ""),
+    (r"/unblock|unblock|unlock input", "unblock", ""),
+    (r"/where|where is (?:the )?mouse|mouse kaha hai|cursor", "where", ""),
     (r"/clip|clipboard( bhejo| dikhao)?", "clipboard_get", ""),
     (r"/windows|windows list|open windows", "windows", ""),
     (r"/sleep", "power", "sleep"),
@@ -108,6 +120,18 @@ PHRASE_RULES = [
     (r"close tab|tab (?:band karo|band kar do|close karo|hatao)", "close", "tab"),
     (r"enter|hit enter|press enter|enter dabao", "press", "enter"),
     (r"(?:press|hit) (\S+)", "press", None),
+]
+
+# Remote-desktop style mouse commands with coordinates (real screen pixels, see /grid)
+_N = r"(-?\d+)\s*,?\s*"
+MOUSE_RULES = [
+    (rf"/?(?:click|tap)\s+{_N}(-?\d+)", "click"),
+    (rf"/?(?:rclick|right\s*click)\s+{_N}(-?\d+)", "rclick"),
+    (rf"/?(?:dclick|double\s*click)\s+{_N}(-?\d+)", "dclick"),
+    (rf"/?(?:move|mouse)\s+{_N}(-?\d+)", "move"),
+    (rf"/?drag\s+{_N}{_N}{_N}(-?\d+)", "drag"),
+    (r"/?scroll\s+(up|down)(?:\s+(\d+))?", "scroll"),
+    (r"/?(?:click|rclick|right\s*click|dclick|double\s*click)", "click_here"),
 ]
 
 # (fullmatch regex, command) whose group 1 is an app name that must pass _simple_target
@@ -128,11 +152,12 @@ def parse_local(user_text: str) -> Optional[List[Command]]:
     for pattern, cmd in RAW_PREFIX_RULES:
         m = re.match(pattern, text, re.IGNORECASE | re.DOTALL)
         if m:
-            return [(cmd, m.group(1).strip())]
+            return [(cmd, (m.group(1) or "").strip())]
 
-    m = re.fullmatch(r"/?click\s+(\d+)\s*,?\s*(\d+)", text, re.IGNORECASE)
-    if m:
-        return [("click", f"{m.group(1)} {m.group(2)}")]
+    for pattern, cmd in MOUSE_RULES:
+        m = re.fullmatch(pattern, text.strip(), re.IGNORECASE)
+        if m:
+            return [(cmd, " ".join(g for g in m.groups() if g))]
 
     norm = _norm(text)
     for pattern, cmd, arg in PHRASE_RULES:
@@ -148,6 +173,11 @@ def parse_local(user_text: str) -> Optional[List[Command]]:
     return None
 
 
+# Commands that change what's on screen -> followed by a screenshot when remote feedback is on
+INPUT_COMMANDS = {"click", "rclick", "dclick", "click_here", "move", "drag", "scroll", "type", "type_enter",
+                  "press", "hotkey", "upload_file", "focus", "open", "close"}
+
+
 def _result(text: str = "", files: list = None) -> dict:
     return {"text": text, "files": files or []}
 
@@ -159,6 +189,8 @@ class HermesAgent:
         self.agent_hook = agent_hook
         # approver(title, details) -> bool; shows Approve/Cancel buttons and waits for the user.
         self.approver = approver
+        # Remote-desktop feedback: send a screenshot (cursor marked) after mouse/keyboard commands.
+        self.remote_feedback = config.REMOTE_FEEDBACK
 
     # ------------------------------------------------------------------
     def process_message(self, user_text: str) -> dict:
@@ -216,6 +248,12 @@ class HermesAgent:
             if res["text"]:
                 texts.append(res["text"])
             files.extend(res["files"])
+        if self.remote_feedback and any(c in INPUT_COMMANDS for c, _ in commands) and not any(
+                f["kind"] == "photo" for f in files):
+            time.sleep(0.8)  # let the screen update
+            shot = config.SCREENSHOTS_DIR / f"remote_{int(time.time() * 1000)}.jpg"
+            if os_bridge.screenshot_annotated(shot):
+                files.append({"kind": "photo", "path": str(shot), "caption": ""})
         return _result("\n".join(texts), files)
 
     # ------------------------------------------------------------------
@@ -263,8 +301,11 @@ class HermesAgent:
         return _result(f"⏯️ Media {arg}" if os_bridge.media_key(arg) else f"⚠️ Media `{arg}` not supported here.")
 
     def cmd_scroll(self, arg):
-        ok = os_bridge.mouse_scroll(dy=5 if arg.strip().lower() == "up" else -5)
-        return _result(f"🖱️ Scrolled {arg}" if ok else "⚠️ Scroll failed")
+        parts = arg.lower().split()
+        direction = parts[0] if parts else "down"
+        notches = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
+        ok = os_bridge.mouse_scroll(dy=notches if direction == "up" else -notches)
+        return _result(f"🖱️ Scrolled {direction} {notches}" if ok else "⚠️ Scroll failed")
 
     def cmd_windows(self, arg):
         titles = [t for _, t in os_bridge.list_windows()]
@@ -281,11 +322,36 @@ class HermesAgent:
         res = os_bridge.power_action(arg)
         return _result(f"⚡ {labels[arg]}…" if res["exit_code"] == 0 else f"⚠️ {res['stderr']}")
 
-    def cmd_screenshot(self, arg):
+    def cmd_screenshot(self, arg, grid: bool = False):
         out_file = config.SCREENSHOTS_DIR / f"shot_{int(time.time() * 1000)}.jpg"
-        if os_bridge.take_screenshot(out_file) and out_file.exists():
-            return _result("", [{"kind": "photo", "path": str(out_file), "caption": "📸 *Desktop Screenshot*"}])
+        if os_bridge.screenshot_annotated(out_file, grid=grid) and out_file.exists():
+            caption = ("🧭 *Screen grid* — numbers are screen pixels: send `click X Y`, `move X Y`, `drag X1 Y1 X2 Y2`"
+                       if grid else "📸 *Desktop Screenshot* (🔴 = mouse)")
+            return _result("", [{"kind": "photo", "path": str(out_file), "caption": caption}])
         return _result("⚠️ Screenshot failed (screen locked, or no desktop session).")
+
+    def cmd_grid(self, arg):
+        return self.cmd_screenshot(arg, grid=True)
+
+    def cmd_where(self, arg):
+        pos = os_bridge.get_cursor_pos()
+        return _result(f"🖱️ Mouse is at *{pos[0]}, {pos[1]}*" if pos else "⚠️ Can't read the mouse position here.")
+
+    def cmd_remote(self, arg):
+        self.remote_feedback = arg.lower() == "on"
+        return _result("📺 Remote view ON: a screenshot follows every mouse/keyboard command."
+                       if self.remote_feedback else "📺 Remote view OFF: send `/shot` when you want to see the screen.")
+
+    def cmd_block(self, arg):
+        res = os_bridge.block_input_for(float(arg) if arg else 10)
+        return _result(("🔒 " + res["stdout"] + "\nSend `/unblock` to release.") if res["exit_code"] == 0 else "⚠️ " + res["stderr"])
+
+    def cmd_unblock(self, arg):
+        return _result("🔓 " + os_bridge.unblock_input()["stdout"])
+
+    def cmd_upload_file(self, arg):
+        res = os_bridge.upload_file_dialog(arg)
+        return _result(("📤 " + res["stdout"]) if res["exit_code"] == 0 else "⚠️ " + res["stderr"])
 
     def cmd_status(self, arg):
         stats = os_bridge.get_system_stats()
@@ -329,19 +395,23 @@ class HermesAgent:
     def _lock_note(self, lock) -> str:
         return " (your mouse/keyboard were locked meanwhile)" if lock.locked else ""
 
+    TYPE_FAILED = ("⚠️ Typing stopped: another window took focus (or the window wasn't ready). "
+                   "Click the text box first (`click X Y`, see `/grid`) and try again.")
+
     def cmd_type(self, arg):
         with os_bridge.UserInputLock("Keyboard Type") as lock:
             ok = os_bridge.type_text(arg)
-        return _result(f"⌨️ Typed `{arg[:100]}`{self._lock_note(lock)}" if ok else "⚠️ Typing failed")
+        return _result(f"⌨️ Typed `{arg[:100]}`{self._lock_note(lock)}" if ok else self.TYPE_FAILED)
 
     def cmd_type_enter(self, arg):
         with os_bridge.UserInputLock("Type & Enter") as lock:
             ok = os_bridge.type_text(arg)
-            time.sleep(0.3)
-            os_bridge.press_key("enter")
+            if ok:
+                time.sleep(0.3)
+                os_bridge.press_key("enter")
         if not ok:
-            return _result("⚠️ Typing failed")
-        return _result(f"⌨️ Typed and submitted `{arg[:250]}`{self._lock_note(lock)}\n📸 Send `/shot` in a few seconds to see the result.")
+            return _result(self.TYPE_FAILED + "\nEnter was NOT pressed.")
+        return _result(f"⌨️ Typed and submitted `{arg[:250]}`{self._lock_note(lock)}")
 
     def cmd_press(self, arg):
         with os_bridge.UserInputLock(f"Key {arg}"):
@@ -353,11 +423,41 @@ class HermesAgent:
             ok = os_bridge.press_hotkey(arg)
         return _result(f"⚡ Pressed *{arg.upper()}*" if ok else f"⚠️ Unknown hotkey `{arg}`")
 
-    def cmd_click(self, arg):
-        x, y = (int(v) for v in arg.split()[:2])
-        with os_bridge.UserInputLock("Mouse Click") as lock:
-            ok = os_bridge.mouse_click(x, y)
-        return _result(f"🖱️ Clicked at *({x}, {y})*{self._lock_note(lock)}" if ok else "⚠️ Click failed")
+    def _xy(self, arg, n=2):
+        vals = [int(v) for v in arg.replace(",", " ").split()[:n]]
+        if len(vals) != n:
+            raise ValueError(f"needs {n} numbers")
+        return vals
+
+    def _mouse(self, label, fn):
+        with os_bridge.UserInputLock(label) as lock:
+            ok = fn()
+        return ok, self._lock_note(lock)
+
+    def cmd_click(self, arg, button="left", double=False, label="Clicked"):
+        x, y = self._xy(arg)
+        ok, note = self._mouse(label, lambda: os_bridge.mouse_click(x, y, button=button, double=double))
+        return _result(f"🖱️ {label} at *({x}, {y})*{note}" if ok else f"⚠️ {label} failed")
+
+    def cmd_rclick(self, arg):
+        return self.cmd_click(arg, button="right", label="Right-clicked")
+
+    def cmd_dclick(self, arg):
+        return self.cmd_click(arg, double=True, label="Double-clicked")
+
+    def cmd_click_here(self, arg):
+        ok, note = self._mouse("Click", lambda: os_bridge.mouse_click())
+        return _result(f"🖱️ Clicked at the current mouse position{note}" if ok else "⚠️ Click failed")
+
+    def cmd_move(self, arg):
+        x, y = self._xy(arg)
+        ok, note = self._mouse("Move", lambda: os_bridge.mouse_move(x, y))
+        return _result(f"🖱️ Mouse moved to *({x}, {y})*" if ok else "⚠️ Move failed")
+
+    def cmd_drag(self, arg):
+        x1, y1, x2, y2 = self._xy(arg, 4)
+        ok, note = self._mouse("Drag", lambda: os_bridge.mouse_drag(x1, y1, x2, y2))
+        return _result(f"🖱️ Dragged *({x1}, {y1}) → ({x2}, {y2})*{note}" if ok else "⚠️ Drag failed")
 
     def cmd_focus(self, arg):
         ok = os_bridge.focus_window(arg)

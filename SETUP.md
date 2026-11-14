@@ -175,6 +175,11 @@ Python used by the Windows launchers: project `.venv` → `python` on PATH (if i
 - Verify: `Win + R` → `shell:startup`.
 - Remove: `uninstall_autostart.bat`.
 
+### A2. Windows as administrator (recommended)
+- Install: run `install_autostart_admin.bat` and click **Yes** once. It creates the scheduled task `TGSystemControl` (at logon, highest privileges, no time limit), removes the normal Startup shortcut, and restarts the bot as administrator.
+- Why: lets the bot block the local mouse/keyboard (`/block`, input lock) and control admin windows.
+- Start manually: `schtasks /Run /TN TGSystemControl` · Stop: `stop_agent.bat` · Remove: `uninstall_autostart.bat`.
+
 ### B. macOS (launchd)
 ```bash
 bash install_autostart_mac.sh
