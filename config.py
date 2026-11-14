@@ -81,7 +81,18 @@ AGENT_MODEL = _get("AGENT_MODEL")  # optional override, tried before the built-i
 AGENT_MAX_STEPS = max(1, _get_int("AGENT_MAX_STEPS", 30))
 AGENT_REQUIRE_APPROVAL = _get_bool("AGENT_REQUIRE_APPROVAL", True)
 APPROVAL_TIMEOUT_SEC = max(30, _get_int("APPROVAL_TIMEOUT_SEC", 300))
+# Video Studio bot (bot 2, separate video pipeline) - started/stopped with /studio
+VIDEOSTUDIO_DIR = _get("VIDEOSTUDIO_DIR", r"D:\VideoStudio_Mac")
+VIDEOSTUDIO_PYTHON = _get("VIDEOSTUDIO_PYTHON")  # default: <VIDEOSTUDIO_DIR>\.venv\Scripts\pythonw.exe
+STUDIO_AUTOSTART = _get_bool("STUDIO_AUTOSTART", True)  # start the Video Studio bot whenever this bot starts
+# Antigravity bridge: type Video Studio bot messages into the Antigravity desktop app (it replies via bot 2)
+ANTIGRAVITY_BRIDGE = _get_bool("ANTIGRAVITY_BRIDGE", True)
+ANTIGRAVITY_PROJECT = _get("ANTIGRAVITY_PROJECT", "CannonBreak Channel")  # pipeline project in Antigravity
+ANTIGRAVITY_EXE = _get("ANTIGRAVITY_EXE")  # default %LOCALAPPDATA%\Programs\Antigravity\Antigravity.exe
+ANTIGRAVITY_BUSY_WAIT_SEC = _get_int("ANTIGRAVITY_BUSY_WAIT_SEC", 900)
+
 REMOTE_FEEDBACK = _get_bool("REMOTE_FEEDBACK", True)  # screenshot after mouse/keyboard commands
+TYPE_METHOD = _get("TYPE_METHOD", "paste").strip().lower()  # "paste" (reliable) or "keys" (key by key)
 INBOX_DIR = Path(os.path.expandvars(os.path.expanduser(
     _get("INBOX_DIR", str(Path.home() / "Downloads" / "TelegramInbox"))
 )))

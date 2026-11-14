@@ -68,12 +68,16 @@ def main():
             all_ok &= check_step(f"Package: {pkg}", False, f"Missing! Run: pip install {pkg}")
 
     # Optional packages
-    for opt_pkg in ["psutil"]:
+    optional = {"psutil": "Native OS bridge will be used",
+                "uiautomation": "Windows: PowerShell helper + mouse will be used (classic Win32 apps won't be listed)"}
+    for opt_pkg, fallback in optional.items():
+        if opt_pkg == "uiautomation" and not is_win:
+            continue
         try:
             importlib.import_module(opt_pkg)
             check_step(f"Optional: {opt_pkg}", True, "Installed")
         except ImportError:
-            check_step(f"Optional: {opt_pkg}", True, "Not installed (Native OS bridge will be used)")
+            check_step(f"Optional: {opt_pkg}", True, f"Not installed ({fallback})")
 
     # 4. Configuration Check (.env) & Memory.md Initialization
     banner("CONFIGURATION & MEMORY CHECK")

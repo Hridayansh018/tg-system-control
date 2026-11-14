@@ -36,12 +36,32 @@ For normal messages the AI is **only a translator**: it answers with commands fr
 ### Privacy
 
 - Runs locally. Your bot token and keys stay in `.env` (git-ignored).
+- Memory (`data\notes.json`, `data\conversation.jsonl`) stays on your PC (git-ignored); notes and the last few messages are sent to the AI with messages that aren't exact commands, and notes are sent with agent tasks.
 - Every action is appended to `memory.md` on your PC (git-ignored, never uploaded).
 - What leaves your PC: messages/screenshots/files you ask the bot to send to Telegram, and — only for messages that aren't exact commands — the message text sent to your chosen AI provider (Gemini / OpenRouter / Groq).
 - **In agent mode, screenshots of your whole screen (all monitors) are sent to Google Gemini** at every step, plus the titles of open windows and the output of any commands/files the agent reads. Close anything private before starting a task.
 - Files you send to the bot are saved in `INBOX_DIR` on your PC.
 
 ---
+
+## 🤖 Two bots, two jobs
+
+| | Bot 1 — **TG-System-Control** (this project, "Hermes agent") | Bot 2 — **Video Studio bot** (`D:\VideoStudio_Mac`) |
+|---|---|---|
+| Purpose | Control the PC: apps, mouse/keyboard, screenshots, files, agent tasks | Talk to the video pipeline (Antigravity): stages, ★ approvals, render alerts |
+| Token | `.env` → `TELEGRAM_BOT_TOKEN` | `tools\.telegram_config.json` → `bot_token` |
+| Runs as | `main.py` (start_agent / autostart) | `tools\videostudio_bot.py` — **starts automatically with bot 1** (`STUDIO_AUTOSTART=true`); stop/start any time from bot 1 with `/studio stop` · `/studio start` |
+| Memory | `/remember`, `/memory`, `/forget` + recent conversation (`data\`) | `/remember`, `/memory`, `/forget` + full chat history; Antigravity sees it with every message |
+
+**Typical flow:** in bot 1 send *"start antigravity and video generation in a new session"* → bot 1 opens Antigravity and starts a new conversation in the pipeline project with the assistant brief + your task → in bot 2 Antigravity says the session is ready, then works through the pipeline: replies to your messages, sends stage updates, contact sheets, thumbnails, files and screenshots, and asks for ★ approvals with ✅/❌ buttons (recorded by the pipeline's own `gate.py`).
+
+**Reactions on your bot 2 messages:** 👀 = Antigravity will get it now · 💤 = nobody is listening yet (bot 1 / the Antigravity session is off — the message is queued and delivered later) · ✍ note saved. These are status marks, not replies. The bridge waits while you're using the PC (4 s without keyboard/mouse; never longer than 5 min) so it doesn't grab your mouse mid-action.
+
+**Approvals don't block Antigravity:** it sends ★ approvals with `telegram_bot.py approve <video> <stage> --async`; the Video Studio bot records your tap with `gate.py approve` and messages Antigravity `[APPROVAL APPROVED/REJECTED] …`. The old blocking `approve` still works.
+
+**Who answers bot 2?** Antigravity — the desktop app. Bot 2 only queues your messages (👀). Bot 1's **Antigravity bridge** types each one into a dedicated *Telegram* conversation of the pipeline project (`ANTIGRAVITY_PROJECT`, default *CannonBreak Channel*) in the Antigravity desktop app, waiting while Antigravity is still busy with the previous message. Antigravity follows `GEMINI.md` and the pipeline rules and answers you itself with `tools/telegram_bot.py send`. The bridge stays out of the way when an Antigravity session already listens by itself (`wait_for_telegram_msg.py`) and while an `/agent` task uses the mouse. Bot 2 also shows 🟢/🔴 ONLINE/OFFLINE (pinned notice + profile); bot 1 reports it if bot 2 crashes.
+
+The two never share a token: one bot may only be read by one program, otherwise messages get stolen or answered twice. TG-System-Control never edits the pipeline's content, gates or rules — `/studio` only starts/stops the Video Studio bot service and reads its status and log.
 
 ## ✨ What's new (v2.0)
 
@@ -105,11 +125,21 @@ Fill in at least `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and (optional) `GEMIN
 | `GROQ_API_KEY` | for groq | — | Groq key (uses `llama-3.3-70b-versatile`) |
 | `HERMES_APP_PATH` | | `D:\git-data\hermes-agent\…\Hermes.exe` | Path used by `open hermes` |
 | `AGENT_ENABLED` | | `true` | Agent mode (`/agent`). Needs `GEMINI_API_KEY` |
-| `AGENT_MODEL` | | `gemini-flash-latest`, then fallbacks | Comma-separated Gemini vision model(s) to try first |
+| `AGENT_MODEL` | | `gemini-flash-lite-latest`, then `gemini-flash-latest` | Comma-separated Gemini vision model(s) to try first |
 | `AGENT_MAX_STEPS` | | `30` | Max actions per task |
 | `AGENT_REQUIRE_APPROVAL` | | `true` | ✅/❌ before risky steps. Keep it on |
 | `APPROVAL_TIMEOUT_SEC` | | `300` | Unanswered approvals/questions are cancelled after this |
 | `INBOX_DIR` | | `~/Downloads/TelegramInbox` | Where files you send to the bot are saved |
+| `UIA_BACKEND` | | `auto` | `powershell` forces the old element-listing helper (blind to classic Win32 controls) |
+| `TYPE_METHOD` | | `paste` | `paste` (clipboard + Ctrl+V, reliable) or `keys` (key by key; use if a field blocks pasting) |
+| `REMOTE_FEEDBACK` | | `true` | Screenshot after every mouse/keyboard command |
+| `STUDIO_AUTOSTART` | | `true` | Start the Video Studio bot whenever this bot starts |
+| `ANTIGRAVITY_BRIDGE` | | `true` | Type Video Studio bot messages into the Antigravity desktop app |
+| `ANTIGRAVITY_PROJECT` | | `CannonBreak Channel` | Antigravity project (sidebar name) that holds the pipeline |
+| `ANTIGRAVITY_EXE` | | `%LOCALAPPDATA%\Programs\Antigravity\Antigravity.exe` | Antigravity desktop app |
+| `ANTIGRAVITY_BUSY_WAIT_SEC` | | `900` | How long to wait for Antigravity to finish the previous message |
+| `VIDEOSTUDIO_DIR` | | `D:\VideoStudio_Mac` | Video pipeline folder for `/studio` |
+| `VIDEOSTUDIO_PYTHON` | | `<VIDEOSTUDIO_DIR>\.venv\Scripts\pythonw.exe` | Python used to run the Video Studio bot |
 
 If the selected provider has no key, the bot runs in **offline mode**: exact commands work, free text gets the help menu. Agent mode always uses Gemini, so it needs `GEMINI_API_KEY` even if `LLM_PROVIDER` is something else.
 
@@ -199,6 +229,12 @@ Exact commands run instantly and work offline. Anything else is translated by th
 | Volume / media | `/volume up`, `/volume mute`, `/media play`, `/media next` |
 | Scroll / windows | `/scroll down`, `/windows` |
 | Power | `/sleep`, `/restart`, `/shutdown` (always ask ✅ first; restart/shutdown wait 15 s) |
+| **Thumbnails** | `/thumbnails luffy marineford p2` (or an idea, or nothing = the READY_TO_UPLOAD video). **Antigravity** (it has the script) writes **5 prompts** — anime style, any text only in white/light-grey and red — into the video's `thumbnail` folder and sends them in the Video Studio bot; then ChatGPT in your real Edge generates them **one at a time**. After each image bot 1 checks that a **new, different** image really arrived (a re-download of an earlier one counts as missing; one retry with *Save image as*), saves it with a YouTube-ready 1280×720 JPG (< 2 MB) and sends it to you |
+| **YouTube upload** | `/ytupload check` — read + verify `READY_TO_UPLOAD\METADATA_COPY_PASTE.txt` (title ≤ 100, description ≤ 5000, tags ≤ 500, files exist, thumbnail ≤ 2 MB, schedule in the future). `/ytupload` — asks ✅, then uploads in your real Edge/YouTube Studio: file, title, description, thumbnail, not-for-kids, tags, location, schedule; **asks ✅ again before the final Schedule/Save click**. The upload only counts as done when a real YouTube video link comes back — otherwise you're told it's unconfirmed. The AI-disclosure (altered content) setting is never touched — you set it yourself |
+| **New pipeline session** | `/studio session <task>` — opens Antigravity, starts a NEW conversation in the pipeline project with your task, makes sure the Video Studio bot is online; Antigravity then works and talks to you in the Video Studio bot. Hinglish: *"antigravity me naya session start karo aur video generation shuru karo"* |
+| **Stop both bots** | `/stopall` (each bot posts 🔴 OFFLINE). On the PC: `stop_all_bots.bat` / `start_all_bots.bat` (the Desktop shortcut *Start TGControl* runs the latter) |
+| **Video Studio bot** | `/studio start` · `/studio stop` · `/studio restart` · `/studio status` · `/studio logs` · Hinglish: *"video studio bot chalu karo"* |
+| **Memory** | `/remember my videos are in D:\VideoStudio_Mac` · `yaad rakhna: …` · `/memory` · `/forget 2` · `/forget thumbnails` · `/forget all`. Follow-ups like *"usko band karo"* use the recent conversation |
 
 ---
 
@@ -214,9 +250,10 @@ Exact commands run instantly and work offline. Anything else is translated by th
 
 **How it works**
 1. You send a task (or the translator decides your message needs several on-screen steps).
-2. Each step the bot takes a screenshot, sends it to Gemini with the task and the steps so far, and gets back **one** action: click, type, hotkey, scroll, open an app or URL, read a file, run a read-only command, send you a screenshot or file, ask you something, or finish.
-3. The action is validated (known action, on-screen coordinates, valid keys) and checked against the safety rules, then executed.
-4. A single progress message is updated every step; a screenshot arrives every 5 steps and at the end with the result.
+2. Each turn the bot reads the **list of buttons, fields, links and menus** of the active window from Windows (UI Automation — the technique used by Microsoft UFO / Windows-MCP), draws their numbers on a screenshot, and sends both to Gemini with the task and the steps so far.
+3. Gemini answers with **1–5 actions** at once, preferably by element number (`type_text` into element 5, `press_key enter`, `click` element 12). Element clicks hit the exact centre Windows reports; pixel coordinates are only a fallback for things not in the list.
+4. Each action is validated (known action, existing element number / on-screen coordinates, valid keys) and checked against the safety rules, then executed.
+5. A single progress message is updated in the background (with how long each AI turn took); a screenshot arrives every 5 turns and at the end with the result and total time.
 
 **While it runs**
 - `/task` — what it's doing · `/stop` — cancel immediately (also releases any input lock).
@@ -228,8 +265,15 @@ Exact commands run instantly and work offline. Anything else is translated by th
 - Log in to websites yourself first — the agent will never type passwords or codes.
 - Start with something harmless (`/agent open notepad and type hello`) to see how it behaves on your screen.
 
+**Speed** (measured on a Windows 11 laptop, free Gemini key)
+- "Type *speed test ok* in Notepad": **5.6 s** (1 AI turn, 2 actions).
+- "Open google.com in Edge and search for …": **~25 s** (3 AI turns, 4 actions).
+- Models that are overloaded or not answering are skipped for 3 minutes (discontinued ones for a day) instead of costing time on every turn; each AI call waits at most ~25 s.
+- Text is typed by pasting (`TYPE_METHOD=paste`), which stays correct when the PC is busy.
+
 **Limits**
-- Each step is one Gemini request with a screenshot and takes a few seconds; the free Gemini tier has daily limits, so long tasks can run out of quota.
+- Each AI turn is one Gemini request with a screenshot (typically 3–6 s); the free Gemini tier has daily limits and is sometimes overloaded, so long tasks can be slow or run out of quota.
+- Apps that don't expose UI Automation (games, some canvas-based web apps) fall back to pixel coordinates, which are less precise.
 - It can misclick or misunderstand — that's why risky steps need your approval. Watch the progress and use `/stop`.
 - Max `AGENT_MAX_STEPS` (default 30) steps per task. Windows is the supported platform for agent mode.
 
@@ -304,7 +348,13 @@ tg-system-control/
 ├── core/
 │   ├── hermes_agent.py       # Local command parser + command handlers
 │   ├── translator.py         # AI translator (Hinglish/free text -> fixed command menu)
-│   ├── computer_agent.py     # Agent mode: screenshot -> vision model -> one validated action
+│   ├── computer_agent.py     # Agent mode: screenshot + element list -> AI -> 1-5 validated actions
+│   ├── ui_elements.py        # Numbered buttons/fields of the active window (UI Automation 3, PowerShell fallback)
+│   ├── ui_actions.py         # Click/type: native controls directly, browsers with real mouse + paste, read-back
+│   ├── ocr.py                # Windows built-in OCR for the click_text fallback
+│   ├── conversation_memory.py # /remember notes + recent conversation for the AI
+│   ├── studio_control.py     # /studio: start/stop/status of the Video Studio bot (bot 2), ONLINE/OFFLINE watch
+│   ├── antigravity_bridge.py # Video Studio messages -> Antigravity desktop app (it replies via bot 2)
 │   ├── agent_safety.py       # Approval rules, read-only shell allowlist, never-type rules
 │   ├── llm_router.py         # Gemini / OpenRouter / Groq / offline
 │   ├── os_bridge.py          # Apps, windows, mouse, keyboard, screenshots, shell
@@ -329,6 +379,47 @@ Issues and pull requests are welcome. Please run `python setup_check.py` before 
 ---
 
 ## 📝 Changelog
+
+### v2.8
+- **Own Python environment:** tg-system-control now has its own `.venv` (`requests`, `Pillow`, `uiautomation`; git-ignored). The launchers pick it automatically, so the video pipeline's Python is no longer borrowed and stays free of these packages. Recreate it anywhere with `python -m venv .venv` + `pip install -r requirements.txt`.
+- **Better desktop UI usage, built only on what was tested:**
+  - Element listing now uses UI Automation 3 (COM, `uiautomation` package): classic Win32 / WinForms / WPF windows, which the old PowerShell helper saw as untyped "panes" (**0 controls**), are listed with real types (10 of 10 in the test window); Antigravity identical; Edge finds more. Same speed (tens of ms). The PowerShell helper stays as a fallback (`UIA_BACKEND=powershell` forces it).
+  - **Native Windows apps:** buttons, checkboxes and list items are acted on directly (Invoke / Toggle / Select, 1-25 ms, no mouse movement); plain text boxes use SetValue with read-back.
+  - **Browsers and Electron apps (Edge, Chrome, Antigravity): real mouse clicks and Ctrl+V, on purpose.** Measured: an invoked click does not open a file picker (browsers need a real user action), rich text boxes (ChatGPT style) show set text but never get the `input` event, Antigravity ignores SetValue. Note: acting on a control can still bring its window to the front - it is not background operation.
+  - **Typed text is read back** from the field; the agent is told "verified", "could not verify" or "the field does NOT show this text".
+  - **OCR fallback:** new agent action `click_text` finds text on screen with Windows' built-in OCR (no install, ~1.5 s) when a control has no accessible name. It obeys the same approval and final-button rules as normal clicks.
+
+### v2.7
+- Thumbnails: Antigravity writes the 5 prompts (it has the script); ChatGPT generates them one at a time; each image must be NEW (content hash), with one retry; delivered one by one.
+- `/ytupload` result is verified by code: a real YouTube link is required to call it done.
+- Non-blocking approvals (`approve --async`), "nobody listening" 💤 reaction on bot 2, bridge heartbeat, bridge waits while you use the PC.
+- `/stopall`, `stop_all_bots.bat`, `start_all_bots.bat` (clean shutdown with OFFLINE notices); Desktop shortcut fixed; dead Startup script removed.
+- Gemini: a brief connection drop is retried once before switching model. Antigravity is told not to edit `tools/` on its own.
+
+### v2.6
+- `/thumbnails`: ChatGPT writes 5 prompts (anime, white/grey + red text), then generates one at a time; every download is verified by code (retry with *Save image as*), YouTube-ready JPGs, sent to the phone.
+- `/ytupload` + `/ytupload check`: METADATA_COPY_PASTE.txt parser/validator, real-Edge YouTube Studio upload with ✅ before start and before the final Schedule/Save button (enforced for any button with that name). AI disclosure left to the owner.
+- Agent: per-task step limits, follow-up hooks, pre-approved files, "confirm buttons", task-specific expected words (no approval spam for sending a prompt); risky-word checks use the agent's intent, not the typed text.
+
+### v2.5
+- `/studio session <task>`: start Antigravity + a new pipeline session connected to the Video Studio bot (assistant brief: updates, images, files, screenshots, ★ approvals via the pipeline's own CLI).
+- Session tracking survives Antigravity renaming conversations; one writer into the Antigravity window at a time.
+
+### v2.4
+- Antigravity bridge: Video Studio bot messages are typed into the Antigravity desktop app, which answers via bot 2.
+- Video Studio bot ONLINE/OFFLINE indicator (pinned notice + profile), crash and PC-shutdown notices from bot 1.
+- Video Studio bot auto-starts with bot 1 (`STUDIO_AUTOSTART`); per-bot update offsets (safe token changes).
+
+### v2.3
+- Two-bot setup: `/studio start|stop|restart|status|logs` controls the separate Video Studio bot service in the video pipeline folder.
+- Memory: `/remember`, `/memory`, `/forget`; recent conversation + notes are given to the AI translator (follow-ups like "usko band karo") and notes to the agent.
+- Pronouns ("usko", "it", "wahi wala") are no longer mistaken for app names.
+
+### v2.2
+- Agent is much faster and more accurate: reads the active window's buttons/fields via Windows UI Automation and clicks them by number (exact centres), up to 5 actions per AI call, smaller screenshots, background progress updates, measured times in replies.
+- Overloaded / timed-out / discontinued Gemini models are skipped automatically (cooldowns) with a ~25 s cap per call; `gemini-2.5-flash` removed from defaults.
+- Typing pastes via the clipboard by default (`TYPE_METHOD`), restoring your clipboard text afterwards; native clipboard read (~1 ms).
+- The bot no longer answers its own "pinned message" notice with "Access Denied" at startup.
 
 ### v2.1
 - Remote-desktop controls: `/grid`, cursor-marked screenshots after every mouse/keyboard command (`/remote on|off`), `rclick`, `dclick`, `move`, `drag`, `scroll down N`, `/where`.

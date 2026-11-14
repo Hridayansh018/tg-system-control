@@ -22,6 +22,17 @@ COMMAND_MENU = {
     "chatgpt": (True, "Open ChatGPT in Edge, start a new chat and submit a prompt. arg = the full prompt in English."),
     "send_latest_download": (False, "Send the newest file from the Downloads folder to the user's phone."),
     "send_file": (True, "Send a file from the PC to the user's phone. arg = file name or path."),
+    "studio": (True, "Control the separate Video Studio bot (the video pipeline's own Telegram bot). "
+                     "arg = start, stop, restart, status or logs."),
+    "remember": (True, "Save a note to the bot's long-term memory. arg = the fact to remember, in English."),
+    "thumbnails": (False, "Generate YouTube thumbnails with ChatGPT in Edge, download them and send them. "
+                          "arg = video name (e.g. 'luffy marineford p2') or a thumbnail idea; empty = the video in "
+                          "READY_TO_UPLOAD."),
+    "ytupload": (False, "Upload + schedule the video to YouTube Studio from READY_TO_UPLOAD metadata. "
+                        "arg = '' to upload, 'check' to only verify the metadata, or a folder path."),
+    "studio_session": (False, "Start Antigravity and a NEW session for the video pipeline (video generation, "
+                              "status, scripts...), connected to the Video Studio bot. arg = the task in English, "
+                              "e.g. 'start a new One Piece what-if video, 40 min' (empty = check status)."),
 }
 
 # Extra commands only offered when agent mode / extra controls are available.
@@ -92,7 +103,7 @@ def _system_prompt(menu: dict, agent_available: bool) -> str:
     )
 
 
-def translate(user_text: str, agent_available: bool = False) -> dict:
+def translate(user_text: str, agent_available: bool = False, context: str = "") -> dict:
     """Returns one of:
     {"kind": "commands", "commands": [(name, arg)], "english": str}
     {"kind": "agent_task", "task": str, "english": str}
@@ -100,7 +111,14 @@ def translate(user_text: str, agent_available: bool = False) -> dict:
     {"kind": "offline"} | {"kind": "error", "error": str}
     """
     menu = _menu(include_extra=agent_available)
-    res = llm_router.route_json(user_text, _system_prompt(menu, agent_available), _schema(menu))
+    prompt = user_text
+    if context:
+        prompt = (
+            "MEMORY (use it to understand references like 'it', 'usko', 'wahi wala', and to answer questions "
+            "about earlier messages; do NOT repeat old commands unless the new message asks for it):\n"
+            f"{context[:4000]}\n\nNEW MESSAGE TO TRANSLATE:\n{user_text}"
+        )
+    res = llm_router.route_json(prompt, _system_prompt(menu, agent_available), _schema(menu))
     if res.get("offline"):
         return {"kind": "offline"}
     if "error" in res:

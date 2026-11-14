@@ -877,6 +877,27 @@ def input_lock_available() -> bool:
         return False
 
 
+def seconds_since_user_input() -> float:
+    """Seconds since the last physical OR synthetic keyboard/mouse input (Windows). Large number elsewhere."""
+    if not IS_WINDOWS:
+        return 1e9
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 1e9
+        ctypes.windll.kernel32.GetTickCount.restype = wintypes.DWORD
+        return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
+    except Exception:
+        return 1e9
+
+
 def mouse_move(x: int, y: int) -> bool:
     if IS_WINDOWS:
         try:
@@ -1193,6 +1214,26 @@ def wait_for_new_window(before_windows: set, before_fg, timeout: float = 8.0) ->
     return False
 
 
+def _paste_text(text: str) -> bool:
+    """Puts text on the clipboard, presses Ctrl+V in the focused window, then restores the
+    user's previous clipboard text. Refuses if focus moves away before pasting."""
+    import ctypes
+    target = ctypes.windll.user32.GetForegroundWindow()
+    old = get_clipboard()
+    if not set_clipboard(text):
+        return _send_unicode_text(text)
+    time.sleep(0.05)
+    if ctypes.windll.user32.GetForegroundWindow() != target:
+        print("[GUI] Focus changed before pasting - not pasted")
+        ok = False
+    else:
+        ok = press_hotkey("ctrl+v")
+    time.sleep(0.35)  # let the app read the clipboard before restoring it
+    if old:  # only text can be restored; non-text clipboard contents (images) are not kept
+        set_clipboard(old)
+    return ok
+
+
 def type_text(text: str) -> bool:
     """Types text into the focused window (waits for it to be ready first).
     Stops if another window takes focus while typing, so text never lands in the wrong window.
@@ -1202,15 +1243,11 @@ def type_text(text: str) -> bool:
     if IS_WINDOWS:
         try:
             wait_foreground_ready()
-            if len(text) > 200:
-                old = get_clipboard()
-                if set_clipboard(text):
-                    time.sleep(0.1)
-                    ok = press_hotkey("ctrl+v")
-                    time.sleep(0.3)
-                    if old is not None:
-                        set_clipboard(old)
-                    return ok
+            # Default: paste via the clipboard (one Ctrl+V). Sending many fast keystrokes is
+            # unreliable when the PC is busy (letters repeat or go missing in Windows 11 apps).
+            # TYPE_METHOD=keys in .env switches back to key-by-key typing.
+            if config.TYPE_METHOD != "keys" and len(text) > 1:
+                return _paste_text(text)
             return _send_unicode_text(text)
         except Exception as e:
             print(f"[GUI] type_text error: {e}")
@@ -1231,6 +1268,7 @@ def list_windows() -> list:
     """Returns [(hwnd, title)] of visible top-level windows with a title."""
     result = []
     if IS_WINDOWS:
+        attach_to_input_desktop()
         try:
             import ctypes
             u32 = ctypes.windll.user32
@@ -1278,10 +1316,12 @@ def force_foreground(hwnd, maximize: bool = False) -> bool:
     k32 = ctypes.windll.kernel32
     fore = u32.GetForegroundWindow()
     tid_fore = u32.GetWindowThreadProcessId(fore, None)
+    tid_target = u32.GetWindowThreadProcessId(hwnd, None)
     tid_cur = k32.GetCurrentThreadId()
 
     u32.AllowSetForegroundWindow(0x0000FFFF)
-    attached = bool(u32.AttachThreadInput(tid_cur, tid_fore, True)) if tid_fore and tid_fore != tid_cur else False
+    att_fore = bool(u32.AttachThreadInput(tid_cur, tid_fore, True)) if tid_fore and tid_fore != tid_cur else False
+    att_target = bool(u32.AttachThreadInput(tid_cur, tid_target, True)) if tid_target and tid_target != tid_cur else False
     try:
         if maximize:
             u32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
@@ -1289,16 +1329,17 @@ def force_foreground(hwnd, maximize: bool = False) -> bool:
             u32.ShowWindow(hwnd, 9)  # SW_RESTORE
         u32.BringWindowToTop(hwnd)
         u32.SetForegroundWindow(hwnd)
+        if hasattr(u32, "SwitchToThisWindow"):
+            u32.SwitchToThisWindow(hwnd, True)
         if u32.GetForegroundWindow() != hwnd:
-            # Foreground lock: a synthetic key press lets us take focus. F24 is used instead of
-            # Alt because an Alt tap turns on "access key" mode in many apps (Windows 11 Notepad,
-            # Office...), which then swallows the first characters we type.
             u32.keybd_event(0x87, 0, 0, 0)
             u32.keybd_event(0x87, 0, 2, 0)
             u32.SetForegroundWindow(hwnd)
     finally:
-        if attached:
+        if att_fore:
             u32.AttachThreadInput(tid_cur, tid_fore, False)
+        if att_target:
+            u32.AttachThreadInput(tid_cur, tid_target, False)
     return u32.GetForegroundWindow() == hwnd
 
 
@@ -1323,11 +1364,11 @@ def focus_window(title_query: str) -> bool:
     return False
 
 
-def focus_and_maximize_window(query: str = "edge") -> bool:
-    """Finds window matching query, restores & maximizes it, and brings to foreground."""
+def focus_and_maximize_window(query="edge") -> bool:
+    """Finds window matching query (or takes HWND int), restores & maximizes it, and brings to foreground."""
     if IS_WINDOWS:
         try:
-            hwnd = _find_window(query)
+            hwnd = query if isinstance(query, int) else _find_window(str(query))
             if hwnd:
                 force_foreground(hwnd, maximize=True)
                 time.sleep(0.5)
@@ -1335,7 +1376,7 @@ def focus_and_maximize_window(query: str = "edge") -> bool:
         except Exception as e:
             print(f"[GUI] focus_and_maximize error: {e}")
         return False
-    return focus_window(query)
+    return focus_window(str(query))
 
 
 # ----------------------------------------------------------------------
@@ -1390,8 +1431,35 @@ def set_clipboard(text: str) -> bool:
 
 def get_clipboard() -> Optional[str]:
     if IS_WINDOWS:
-        res = run_command("Get-Clipboard -Raw", timeout=10)
-        return res["stdout"] if res["exit_code"] == 0 else None
+        try:  # direct Win32 call (~1 ms instead of ~450 ms through PowerShell)
+            import ctypes
+            u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+            u32.GetClipboardData.restype = ctypes.c_void_p
+            k32.GlobalLock.argtypes = [ctypes.c_void_p]
+            k32.GlobalLock.restype = ctypes.c_void_p
+            k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            for _ in range(5):
+                if u32.OpenClipboard(0):
+                    break
+                time.sleep(0.05)
+            else:
+                return None
+            try:
+                h = u32.GetClipboardData(13)  # CF_UNICODETEXT
+                if not h:
+                    return ""
+                p = k32.GlobalLock(h)
+                if not p:
+                    return ""
+                try:
+                    return ctypes.wstring_at(p)
+                finally:
+                    k32.GlobalUnlock(h)
+            finally:
+                u32.CloseClipboard()
+        except Exception:
+            res = run_command("Get-Clipboard -Raw", timeout=10)
+            return res["stdout"] if res["exit_code"] == 0 else None
     if IS_MAC:
         return run_command("pbpaste")["stdout"]
     if IS_LINUX:

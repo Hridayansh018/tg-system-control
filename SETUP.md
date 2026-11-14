@@ -57,6 +57,7 @@ When the bot starts (manually or on boot):
 |---|---|---|
 | `requests` | Telegram and AI HTTP calls | `>= 2.28.0` |
 | `Pillow` | Screenshots and image handling | `>= 9.0.0` |
+| `uiautomation` *(optional, Windows)* | Lists controls of classic Win32/WinForms/WPF apps and acts on native controls directly (Invoke/SetValue/Toggle), reads fields back to confirm typed text. Without it the bot falls back to the PowerShell helper and the mouse. | `>= 2.0.29` |
 | `psutil` *(optional)* | More precise RAM numbers. Without it the bot uses CIM (Windows), `vm_stat` (macOS) or `/proc/meminfo` (Linux). | `>= 5.9.0` |
 
 Optional tools on Linux: `xdotool` (typing/clicks/keys), `wmctrl` (focus windows), `xclip`/`xsel`/`wl-copy` (clipboard), `gnome-screenshot`/`scrot`/`grim` (screenshot fallback). On macOS, grant Terminal/Python **Accessibility** and **Screen Recording** permissions; `cliclick` enables mouse clicks.

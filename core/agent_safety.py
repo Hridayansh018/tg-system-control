@@ -110,18 +110,32 @@ def blocked_text_reason(text: str, thought: str = "") -> Optional[str]:
 
 
 _RISKY_WORDS = re.compile(
-    r"\b(send|submit|post|publish|tweet|reply all|buy|pay|purchase|order|checkout|place order|transfer|"
+    r"\b(send|submit|post|publish|go live|tweet|reply all|buy|pay|purchase|order|checkout|place order|transfer|"
     r"delete|remove|uninstall|install|format|erase|confirm|accept terms|sign up|subscribe|unsubscribe|"
     r"empty trash|empty recycle|wipe|reset|shut ?down|restart|log ?out|sign out)\b",
     re.IGNORECASE,
 )
 
 
-def approval_reason(action: dict) -> Optional[str]:
-    """Returns why this step needs the user's approval, or None if it can run directly."""
+def _clicked_button_name(action: dict) -> str:
+    """Name of the BUTTON a click targets ('' if unknown): an element click by its label, or click_text by its text."""
+    if action.get("action") == "click_text":
+        return re.sub(r"\s+", " ", str(action.get("text", ""))).strip().lower()
+    m = re.match(r'\[\d+\] Button "(.*)"$', action.get("_label", ""))
+    return m.group(1).strip().lower() if m else ""
+
+
+def approval_reason(action: dict, confirm_buttons: tuple = (), expected_words: tuple = ()) -> Optional[str]:
+    """Returns why this step needs the user's approval, or None if it can run directly.
+    confirm_buttons: button names that always need approval for this task (e.g. YouTube's final 'Schedule').
+    expected_words: risky words that are the task's normal job (e.g. 'send' a prompt to ChatGPT)."""
     act = action["action"]
     if action.get("risky"):
         return action.get("risk_reason") or "The agent marked this step as risky"
+    if confirm_buttons and act in ("click", "double_click", "click_text"):
+        name = _clicked_button_name(action)
+        if name and name in confirm_buttons:
+            return f"This clicks the final '{name.title()}' button"
     if act == "run_shell":
         if not shell_is_read_only(action.get("command", "")):
             return "Runs a shell command that can change your system"
@@ -132,11 +146,13 @@ def approval_reason(action: dict) -> Optional[str]:
         return "This shortcut can close windows or lose work"
     if act in ("send_file_to_user", "read_file", "list_dir", "upload_file"):
         return path_needs_approval(action.get("path", ""))
-    if act in ("click", "double_click", "press_key", "type_text"):
-        text = " ".join(str(action.get(k, "")) for k in ("thought", "text", "key"))
+    if act in ("click", "double_click", "click_text", "press_key", "type_text"):
+        # Intent = the agent's reasoning (+ the clicked control's name), NOT the text being typed:
+        # a video description may well contain words like "send" or "order".
+        text = " ".join(str(action.get(k, "")) for k in (("thought", "key", "_label", "text") if act == "click_text" else ("thought", "key", "_label")))
         if act == "press_key" and action.get("key", "").lower() not in ("enter", "return"):
             return None
-        m = _RISKY_WORDS.search(text)
-        if m:
-            return f"Step looks like it will '{m.group(0)}' something"
+        for m in _RISKY_WORDS.finditer(text):
+            if m.group(0).lower() not in expected_words:
+                return f"Step looks like it will '{m.group(0)}' something"
     return None

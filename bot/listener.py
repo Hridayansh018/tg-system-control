@@ -22,8 +22,11 @@ sys.path.insert(0, str(ROOT))
 import config
 from bot import telegram_client
 from core.hermes_agent import HermesAgent, llm_status_line, parse_local
+from core import antigravity_bridge
 from core import computer_agent
+from core import conversation_memory
 from core import memory_logger
+from core import studio_control
 from core import os_bridge
 from core import system_lifecycle
 
@@ -31,13 +34,22 @@ OFFSET_FILE = config.TEMP_DIR / ".last_update_id"
 
 # Commands that are safe to run while the agent is using the mouse/keyboard.
 READ_ONLY_COMMANDS = {"status", "screenshot", "processes", "help", "windows", "clipboard_get", "send_file",
-                      "send_latest_download", "agent", "grid", "where", "unblock", "remote"}
+                      "send_latest_download", "agent", "grid", "where", "unblock", "remote",
+                      "studio", "memory", "remember", "forget", "thumbnails", "ytupload", "stopall"}
+
+
+def _bot_id() -> str:
+    return str(config.TELEGRAM_BOT_TOKEN).split(":", 1)[0]
 
 
 def load_last_offset() -> int:
+    """Telegram numbers updates per bot, so the saved offset is only valid for the bot that wrote it
+    ("<bot id>:<offset>"). A different bot (new token) or the old plain format starts fresh."""
     if OFFSET_FILE.exists():
         try:
-            return int(OFFSET_FILE.read_text().strip())
+            bot, _, off = OFFSET_FILE.read_text().strip().partition(":")
+            if off and bot == _bot_id():
+                return int(off)
         except Exception:
             pass
     return 0
@@ -45,7 +57,7 @@ def load_last_offset() -> int:
 
 def save_last_offset(offset: int):
     try:
-        OFFSET_FILE.write_text(str(offset))
+        OFFSET_FILE.write_text(f"{_bot_id()}:{offset}")
     except Exception:
         pass
 
@@ -198,11 +210,20 @@ class Listener:
         if brain is not None:
             self.computer = computer_agent.ComputerAgent(TelegramAgentUI(chat_id, self.approvals, self.questions), brain)
         self.agent = HermesAgent(agent_hook=self._agent_hook if self.computer else None,
-                                 approver=lambda title, details: self.approvals.request(title, details))
+                                 approver=lambda title, details: self.approvals.request(title, details),
+                                 agent_submit=self.computer.submit if self.computer else None,
+                                 notifier=lambda result: send_result(chat_id, result))
         self.commands: "queue.Queue[tuple]" = queue.Queue()
         threading.Thread(target=self._command_worker, name="command-worker", daemon=True).start()
         self.network_down_since = None
         self.conflict_logged = False
+
+    def _studio_went_offline(self, reason: str):
+        """The Video Studio bot stopped without announcing it (crash / kill / token problem)."""
+        studio_control.announce_offline(f"Unexpected: {reason}")
+        telegram_client.send_message(
+            self.chat_id, f"⚠️ *Video Studio bot went OFFLINE:* {reason}\nSend `/studio start` to start it again.")
+        memory_logger.log_entry("STUDIO", "Video Studio bot went offline unexpectedly", details={"reason": reason[:200]})
 
     # --- agent glue ---------------------------------------------------
     def _agent_hook(self, task: str) -> dict:
@@ -214,7 +235,11 @@ class Listener:
             chat_id, text = self.commands.get()
             try:
                 telegram_client.send_chat_action(chat_id)
-                send_result(chat_id, self.agent.process_message(text))
+                result = self.agent.process_message(text)
+                send_result(chat_id, result)
+                reply = (result.get("text") or "").strip() or " ".join(
+                    f"[{f.get('kind')}: {Path(f['path']).name}]" for f in result.get("files") or [])
+                conversation_memory.add_exchange(text, reply or "(started agent task)")
             except Exception as err:
                 print(f"[Listener] Error handling '{text}': {err}")
                 telegram_client.send_message(chat_id, f"⚠️ Error executing command: `{err}`")
@@ -308,7 +333,12 @@ class Listener:
         if msg:
             chat_id = msg.get("chat", {}).get("id")
             sender = msg.get("from", {}) or {}
+            # Service notices (e.g. "bot pinned a message") and anything sent by a bot: ignore silently.
+            if sender.get("is_bot") or not any(k in msg for k in ("text", "document", "photo", "video", "audio", "voice")):
+                return False
             if not is_authorized(chat_id, sender.get("id")):
+                if str(chat_id) == str(config.TELEGRAM_CHAT_ID).strip():
+                    return False  # never answer "Access Denied" inside the owner's own chat
                 print(f"⛔ Unauthorized access attempt from Chat ID {chat_id} ({sender.get('first_name')})")
                 memory_logger.log_entry("SECURITY", "Rejected unauthorized message",
                                         details={"chat_id": chat_id, "from": sender.get("id")})
@@ -358,6 +388,15 @@ class Listener:
         print("⚙️ Warming up packages, display context, and app catalog...")
         warmup_summary = system_lifecycle.warmup_all_subsystems()
         warmup_summary["agent_mode"] = "ON" if self.computer else "OFF"
+
+        if config.STUDIO_AUTOSTART:
+            try:
+                res = studio_control.start()
+                warmup_summary["video_studio_bot"] = ("running" if res["ok"] else "not started: " + res["msg"])[:150]
+                memory_logger.log_entry("STUDIO", "Video Studio bot auto-start",
+                                        details={"ok": res["ok"], "result": res["msg"][:200]})
+            except Exception as e:
+                warmup_summary["video_studio_bot"] = f"auto-start error: {e}"[:150]
         print(f"✅ All Subsystems Primed in {warmup_summary.get('total_warmup_ms')}ms: {warmup_summary}")
 
         last_offset = load_last_offset()
@@ -371,6 +410,12 @@ class Listener:
                 print(f"[Listener] Init warning: {e}")
 
         system_lifecycle.notify_online(warmup_summary)
+        studio_control.watch(self._studio_went_offline)
+        if config.ANTIGRAVITY_BRIDGE:
+            antigravity_bridge.Bridge(
+                can_use_input=lambda: not (self.computer and self.computer.busy()),
+                notify_owner=lambda text: telegram_client.send_message(self.chat_id, text),
+            ).start()
         print("🟢 Polling Telegram for messages (Press Ctrl+C to stop)...")
 
         while True:

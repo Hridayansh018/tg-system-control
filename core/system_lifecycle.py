@@ -99,6 +99,9 @@ def notify_online(warmup_summary: dict = None):
             f"📦 *Apps Indexed:* `{warmup_summary.get('app_catalog', 'Ready')}`\n"
             f"🌐 *Network API:* `{warmup_summary.get('telegram_api', 'Connected')}`\n"
         )
+        if "video_studio_bot" in warmup_summary:
+            vs = warmup_summary["video_studio_bot"]
+            warmup_line += f"🎬 *Video Studio bot:* {'🟢' if vs == 'running' else '⚠️'} `{vs}`\n"
 
     online_text = (
         f"🟢 *SYSTEM ONLINE* ⚡\n\n"
@@ -172,6 +175,22 @@ def safe_offline(reason: str):
 
 
 _safe_offline = safe_offline  # backwards-compatible name
+
+_STUDIO_SHUTDOWN_DONE = threading.Event()
+
+
+def studio_offline_on_shutdown(reason: str):
+    """PC shutdown / logoff: Windows kills the Video Studio bot without warning, so announce its
+    🔴 OFFLINE for it (once). Not used when only this bot stops - the Video Studio bot keeps running then."""
+    if _STUDIO_SHUTDOWN_DONE.is_set():
+        return
+    _STUDIO_SHUTDOWN_DONE.set()
+    try:
+        from core import studio_control
+        if studio_control.status().get("running"):
+            studio_control.announce_offline(f"PC: {reason}")
+    except Exception as e:
+        print(f"[Lifecycle] Video Studio offline notice failed: {e}")
 
 
 def _exit_after_offline(reason: str, code: int = 0):
@@ -269,6 +288,7 @@ def _start_shutdown_listener_window():
     def wnd_proc(hwnd, msg, wparam, lparam):
         if msg == WM_QUERYENDSESSION:
             reason = "Windows user logging off" if (lparam & ENDSESSION_LOGOFF) else "Windows shutting down / restarting"
+            studio_offline_on_shutdown(reason)
             safe_offline(f"Desktop Shutdown: {reason}")
             return 1  # allow the session to end
         if msg == WM_ENDSESSION and wparam:
@@ -331,6 +351,8 @@ def register_lifecycle_hooks():
                 # CTRL_C/CTRL_BREAK are handled by Python (KeyboardInterrupt / SIGBREAK).
                 if ctrl_type in (2, 5, 6):
                     events = {2: "Console window closed", 5: "Windows user logging off", 6: "Windows system shutdown"}
+                    if ctrl_type in (5, 6):  # the whole session ends -> the Video Studio bot dies too
+                        studio_offline_on_shutdown(events[ctrl_type])
                     safe_offline(f"Desktop Shutdown: {events[ctrl_type]}")
                 return False
 

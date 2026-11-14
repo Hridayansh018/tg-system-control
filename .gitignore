@@ -8,3 +8,5 @@ screenshots/
 temp/
 memory.md
 .DS_Store
+data/
+.venv/

@@ -11,10 +11,13 @@ Flow for every message:
 """
 import re
 import time
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 import config
+from . import conversation_memory
 from . import llm_router
+from . import studio_control
 from . import memory_logger
 from . import os_bridge
 from . import translator
@@ -49,6 +52,16 @@ HELP_TEXT = (
     "• `/remote off|on` — screenshot after every mouse/keyboard command\n\n"
     "• `/focus <window>` · `/chatgpt <prompt>`\n"
     "• `/sendfile <name>` · `/latest` (newest download)\n\n"
+    "*📺 YouTube workflow:*\n"
+    "• `/thumbnails [video | idea]` — ChatGPT (Edge) → thumbnails → downloaded, saved, sent here\n"
+    "• `/ytupload check` — verify READY\\_TO\\_UPLOAD metadata · `/ytupload` — upload + schedule (asks ✅)\n\n"
+    "*🎬 Video Studio bot (separate pipeline bot):*\n"
+    "• `/studio session <task>` — open Antigravity and start a NEW pipeline session (it then talks to you in the Video Studio bot)\n"
+    "  e.g. _\"antigravity me naya session start karo aur One Piece video generation shuru karo\"_\n"
+    "• `/studio start` · `/studio stop` · `/studio restart` · `/studio status` · `/studio logs`\n"
+    "• `/stopall` — clean shutdown of BOTH bots (each posts 🔴 OFFLINE)\n\n"
+    "*🧠 Memory:*\n"
+    "• `/remember <note>` · `/memory` · `/forget <n|word|all>`\n\n"
     "*Anything else* (Hinglish or English) is translated into these commands by the AI, "
     "e.g. _\"spotify kholo aur edge band karo\"_."
 )
@@ -71,9 +84,15 @@ def _norm(text: str) -> str:
     return _END_PUNCT.sub("", re.sub(r"\s+", " ", text.strip().lower()))
 
 
+# "usko band karo" / "close it" refer to something said earlier -> let the translator use memory
+PRONOUNS = {"it", "that", "this", "them", "usko", "isko", "use", "ise", "unko", "inko", "wo", "woh", "vo", "yeh",
+            "ye", "wahi", "same", "previous", "last", "pichla", "wala", "wali"}
+
+
 def _simple_target(arg: str) -> bool:
     words = arg.split()
-    return 0 < len(words) <= 5 and not any(w in CONNECTOR_WORDS for w in words)
+    return (0 < len(words) <= 5 and not any(w in CONNECTOR_WORDS for w in words)
+            and not any(w in PRONOUNS for w in words))
 
 
 # (regex on the ORIGINAL text, command) - arguments are kept exactly as typed
@@ -96,12 +115,20 @@ RAW_PREFIX_RULES = [
     (r"^(?:/uploadfile|/upload|upload file:?)\s+(.+)$", "upload_file"),
     (r"^/block(?:\s+(\d+(?:\.\d+)?))?\s*(?:m|min|mins|minutes)?$", "block"),
     (r"^/remote\s+(on|off)$", "remote"),
+    (r"^/(?:stopall|stop all|shutdown bots)$", "stopall"),
+    (r"^/studio\s+session(?:\s+(.+))?$", "studio_session"),
+    (r"^/thumbnails?(?:\s+(.+))?$", "thumbnails"),
+    (r"^/ytupload(?:\s+(.+))?$", "ytupload"),
+    (r"^/studio(?:\s+(start|stop|restart|status|logs))?$", "studio"),
+    (r"^(?:/remember|remember:|yaad rakhna:?|yaad rakho:?)\s+(.+)$", "remember"),
+    (r"^/forget(?:\s+(.+))?$", "forget"),
 ]
 
 # (fullmatch regex on the normalised text, command, arg-or-None-for-group-1)
 PHRASE_RULES = [
     (r"/help|/start|help|commands|menu", "help", ""),
     (r"/grid|grid|screen grid|grid dikhao", "grid", ""),
+    (r"/memory|memory|kya yaad hai|what do you remember", "memory", ""),
     (r"/unblock|unblock|unlock input", "unblock", ""),
     (r"/where|where is (?:the )?mouse|mouse kaha hai|cursor", "where", ""),
     (r"/clip|clipboard( bhejo| dikhao)?", "clipboard_get", ""),
@@ -184,7 +211,12 @@ def _result(text: str = "", files: list = None) -> dict:
 
 class HermesAgent:
     def __init__(self, agent_hook: Optional[Callable[[str], dict]] = None,
-                 approver: Optional[Callable[[str, str], bool]] = None):
+                 approver: Optional[Callable[[str, str], bool]] = None,
+                 agent_submit: Optional[Callable] = None,
+                 notifier: Optional[Callable[[dict], None]] = None):
+        # agent_submit(text, **options) -> queue note; notifier(result) sends {"text","files"} to the owner later.
+        self.agent_submit = agent_submit
+        self.notifier = notifier
         # agent_hook(task) -> result dict; set by the listener when agent mode is available.
         self.agent_hook = agent_hook
         # approver(title, details) -> bool; shows Approve/Cancel buttons and waits for the user.
@@ -199,7 +231,8 @@ class HermesAgent:
         if local is not None:
             return self.run_commands(local, user_text)
 
-        tr = translator.translate(user_text, agent_available=self.agent_hook is not None)
+        tr = translator.translate(user_text, agent_available=self.agent_hook is not None,
+                                  context=conversation_memory.context_text())
         kind = tr.get("kind")
 
         if kind == "offline":
@@ -329,6 +362,160 @@ class HermesAgent:
                        if grid else "📸 *Desktop Screenshot* (🔴 = mouse)")
             return _result("", [{"kind": "photo", "path": str(out_file), "caption": caption}])
         return _result("⚠️ Screenshot failed (screen locked, or no desktop session).")
+
+    # --- Video Studio bot (bot 2) -----------------------------------------
+    def cmd_studio(self, arg):
+        action = (arg or "status").strip().lower()
+        if action in ("start", "on", "chalu"):
+            res = studio_control.start()
+        elif action in ("stop", "off", "band"):
+            res = studio_control.stop()
+        elif action == "restart":
+            res = studio_control.restart()
+        elif action == "logs":
+            return _result("🎬 *Video Studio bot log:*\n```\n" + studio_control.logs()[-3500:] + "\n```")
+        else:
+            return _result(studio_control.status_text())
+        icon = "✅" if res["ok"] else "⚠️"
+        return _result(f"{icon} {res['msg']}\n{studio_control.status_text()}")
+
+    def cmd_stopall(self, arg):
+        """Clean shutdown of BOTH bots: the Video Studio bot first (🔴 OFFLINE in its chat), then this one
+        (🔴 OFFLINE here). Bring them back with start_all_bots.bat on the PC (or at the next Windows login)."""
+        import threading
+
+        def later():
+            time.sleep(4)  # let this reply go out first
+            try:
+                res = studio_control.stop()
+                print(f"[StopAll] {res['msg']}")
+            except Exception as e:
+                print(f"[StopAll] Video Studio bot stop failed: {e}")
+            from . import system_lifecycle
+            system_lifecycle._exit_after_offline("Stopped with /stopall")
+
+        threading.Thread(target=later, name="stopall", daemon=True).start()
+        return _result("🛑 Stopping both bots cleanly… the Video Studio bot first, then me. Each posts a 🔴 OFFLINE "
+                       "notice. To start them again: `start_all_bots.bat` on the PC (or the next Windows login).")
+
+    def cmd_studio_session(self, arg):
+        """Start a new Antigravity session for the video pipeline, connected to the Video Studio bot."""
+        st = studio_control.status()
+        if not st.get("running"):
+            res = studio_control.start()
+            if not res["ok"]:
+                return _result(f"⚠️ Video Studio bot couldn't start, so no session was started: {res['msg']}")
+        from . import antigravity_bridge
+        task = arg.strip() or "Start the video generation pipeline: check the status of all videos and tell me the next step."
+        try:
+            title = antigravity_bridge.start_session(task, sender="Owner (via PC bot)")
+        except Exception as e:
+            return _result(f"⚠️ Couldn't start an Antigravity session: {e}")
+        memory_logger.log_entry("STUDIO", "New Antigravity session", details={"title": title, "task": task[:200]})
+        return _result(
+            f"🚀 New Antigravity session started: *{title}*\n"
+            f"📝 Task: _{task[:300]}_\n"
+            f"{studio_control.status_text()}\n\n"
+            "Antigravity will message you in the *Video Studio bot* (updates, images, files, approvals). "
+            "Reply there to talk to this session.")
+
+    # --- Workflows: thumbnails + YouTube upload ---------------------------------
+    def cmd_thumbnails(self, arg):
+        from . import workflows
+        if not self.agent_submit:
+            return _result("⚠️ Thumbnails need agent mode (set `GEMINI_API_KEY`, then restart the bot).")
+        query = (arg or "").strip()
+        video_dir = workflows.find_video_dir(query) if query else None
+        if not query:
+            meta_file = workflows.default_metadata_file()
+            if meta_file.exists():  # default: the video that's ready to upload
+                vid = Path(workflows.parse_metadata(meta_file).get("video", ""))
+                video_dir = next((d for d in workflows.video_dirs() if d in vid.parents), None)
+        extra = "" if (video_dir and query) else query  # text that isn't a video name = the user's own idea
+        if not video_dir and not extra:
+            return _result("⚠️ Tell me which video or what idea, e.g. `/thumbnails luffy marineford p2`.")
+        # Antigravity must be reachable: the Video Studio bot service up (it queues for the bridge)
+        if not studio_control.status().get("running"):
+            res = studio_control.start()
+            if not res["ok"]:
+                return _result(f"⚠️ Antigravity writes the prompts, but the Video Studio bot can't start: {res['msg']}")
+        job = workflows.ThumbnailJob(video_dir, extra, self.agent_submit, self._notify,
+                                     request_prompts=lambda text: studio_control.queue_request(text, "PC bot (thumbnails)"))
+        memory_logger.log_entry("WORKFLOW", "Thumbnail job started",
+                                details={"video": video_dir.name if video_dir else "idea", "idea": extra[:120]})
+        job.start()
+        return _result(f"🎨 *Thumbnail job started*\n"
+                       f"1️⃣ Antigravity (it has the script) writes {workflows.THUMB_COUNT} prompts — anime, text only in "
+                       f"white/light-grey + red — and sends them in the Video Studio bot\n"
+                       f"2️⃣ Then ChatGPT (Edge) generates them one at a time; each image is checked (must be new), "
+                       f"saved and sent here\n"
+                       f"📁 Saved in `{job.dest}`\n/task shows progress, /stop cancels.")
+
+    def cmd_ytupload(self, arg):
+        from . import workflows
+        # Options (any order): check / test / dry-run = only verify, private = ignore the schedule and save as Private;
+        # anything else = a metadata file or folder path.
+        tokens = (arg or "").split()
+        flags = {t.lower() for t in tokens}
+        dry_run = bool(flags & {"check", "test", "dry", "dry-run", "preview"})
+        private = "private" in flags
+        path_text = " ".join(t for t in tokens if t.lower() not in
+                             {"check", "test", "dry", "dry-run", "preview", "private"}).strip().strip('"')
+        target = Path(path_text) if path_text else workflows.default_metadata_file()
+        if target.is_dir():
+            target = target / "METADATA_COPY_PASTE.txt"
+        if not target.exists():
+            return _result(f"⚠️ Metadata file not found: `{target}`")
+        meta = workflows.parse_metadata(target)
+        if private:
+            meta["force_private"] = True
+        errors, warnings = workflows.validate_metadata(meta)
+        text = "📤 *YouTube upload check*\n\n" + workflows.summary(meta)
+        if warnings:
+            text += "\n\n⚠️ " + "\n⚠️ ".join(warnings)
+        if errors:
+            return _result(text + "\n\n❌ *Can't upload:*\n• " + "\n• ".join(errors))
+        if dry_run:
+            return _result(text + "\n\n✅ All checks passed. Send `/ytupload` to upload.")
+        if not self.agent_submit:
+            return _result(text + "\n\n⚠️ Uploading needs agent mode (set `GEMINI_API_KEY`).")
+        if not (self.approver and self.approver("Upload this video to YouTube?", workflows.summary(meta))):
+            return _result(text + "\n\n❌ Upload cancelled.")
+        files = [meta["video"]] + ([meta["thumbnail"]] if meta.get("thumbnail") else [])
+
+        def done(ok, final_text):
+            confirmed, msg = workflows.verify_upload_result(ok, final_text)
+            memory_logger.log_entry("WORKFLOW", f"YouTube upload {'confirmed' if confirmed else 'NOT confirmed'}",
+                                    details={"title": meta.get("title", "")[:100], "result": final_text[:300]})
+            self._notify({"text": msg, "files": []})
+
+        note = self.agent_submit(workflows.upload_task(meta), max_steps=200, on_done=done, allowed_paths=files,
+                                 label=f"YouTube upload: {meta.get('title', '')[:60]}",
+                                 confirm_buttons=("schedule", "publish", "save", "post"))
+        return _result(text + "\n\n🚀 Uploading in YouTube Studio (Edge)… I'll ask ✅ before the final "
+                       "Schedule/Save click. /task shows progress, /stop cancels." + (f"\n{note}" if note else ""))
+
+    def _notify(self, result: dict):
+        if self.notifier:
+            self.notifier(result)
+
+    # --- Memory ----------------------------------------------------------------
+    def cmd_remember(self, arg):
+        n = conversation_memory.remember(arg)
+        return _result(f"🧠 Saved as note #{n}. Send `/memory` to see all notes, `/forget {n}` to remove it.")
+
+    def cmd_forget(self, arg):
+        if not arg:
+            return _result("Send `/forget <number>`, `/forget <word>` or `/forget all`.\n\n" +
+                           (conversation_memory.notes_text() or "(no notes)"))
+        removed = conversation_memory.forget(arg)
+        return _result(f"🗑️ Removed {removed} note(s)." if removed else f"No note matched `{arg}`.")
+
+    def cmd_memory(self, arg):
+        nt = conversation_memory.notes_text() or "(no notes yet — `/remember <something>`)"
+        conv = conversation_memory.recent(5)
+        recent = "\n".join(f"• {c['user'][:60]}" for c in conv) or "(nothing yet)"
+        return _result(f"🧠 *Notes:*\n{nt}\n\n💬 *Recent messages I remember:*\n{recent}")
 
     def cmd_grid(self, arg):
         return self.cmd_screenshot(arg, grid=True)

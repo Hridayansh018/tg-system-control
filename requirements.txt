@@ -1,3 +1,6 @@
 # Core dependencies
 requests>=2.28.0
 Pillow>=9.0.0
+
+# Optional (Windows): act on native controls directly (Invoke/SetValue/Toggle) and read fields back
+uiautomation>=2.0.29; sys_platform == "win32"
